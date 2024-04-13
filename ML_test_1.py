@@ -664,8 +664,7 @@ def validate_agent(agent_save_filename, testing_set):
 def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str):
         # Instantiate the trading environment with in-sample data
         env_in_sample = ForexTradingEnv(training_set)
-        # Initialize the best validation score to a high number (effectively infinity)
-        best_validation_score = float('inf')
+        best_validation_score = -float('inf')
         episodes_without_improvement = 0
         patience = 10  # Number of episodes to tolerate no improvement in validation score
         validation_frequency = 5  # Define how often to validate (e.g., every 5 epochs)
@@ -750,7 +749,7 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
 
             print(f'epoch {e} total training reward is {total_reward} and total profit is {total_in_sample_profit} and total validation reward is {total_test_reward} and total profit is {total_out_of_sample_profit_number}')
 
-            if total_test_reward < best_validation_score and total_out_of_sample_profit_number > 0:
+            if total_test_reward > best_validation_score and total_out_of_sample_profit_number > 0:
                 best_validation_score = total_test_reward
                 
                 # Define the directory to save the model based on some parameters
