@@ -21,6 +21,7 @@ import matplotlib.dates as mdates
 import time
 import random
 from collections import deque
+import math
 
 # Define the ForexTradingEnv class, inheriting from gym.Env to create a custom trading environment
 class ForexTradingEnv(gym.Env):
@@ -749,8 +750,10 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
 
             print(f'epoch {e} total training reward is {total_reward} and total profit is {total_in_sample_profit} and total validation reward is {total_test_reward} and total profit is {total_out_of_sample_profit_number}')
 
-            if total_test_reward > best_validation_score and total_out_of_sample_profit_number > 0:
+            """
+            if total_test_reward < best_validation_score:
                 best_validation_score = total_test_reward
+                episodes_without_improvement = 0
                 
                 # Define the directory to save the model based on some parameters
                 save_dir = os.path.join("saved_models", f"{Pair}_{timeframe_str}")
@@ -764,6 +767,13 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
                 # Save the state of the agent
                 agent.save_state(agent_save_filename_best)
                 print(f"Saved improved model to {agent_save_filename_best}")
+            else:
+                episodes_without_improvement += 1
+
+            if episodes_without_improvement >= patience:
+                print("Early stopping triggered")
+                break  # Exit the training loop if patience is exceeded
+            """
 
 def evaluate_model(agent_save_filename, testing_set):
         # Initialize the trading environment with out-of-sample data
@@ -1170,7 +1180,13 @@ def training_ppo_model(choice):
         for file in training_files:
             training_set = read_csv_to_dataframe(file)
 
-    episodes = 1000
+    # Reinitializing the variables for calculation
+    initial_epsilon = 0.1
+    decay_rate = 0.99
+    min_epsilon = 0.01
+
+    # Re-calculate using the provided formula and rounding the result to the nearest whole number
+    episodes = math.ceil(math.log(min_epsilon / initial_epsilon) / math.log(decay_rate))
 
     train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str)
 
@@ -1187,7 +1203,7 @@ def evaluate_ppo_model():
 
         evaluation_dataset = read_csv_to_dataframe(file)
     
-    evaluate_model(f"agent_state_best_{Pair}_{timeframe_str}.pkl", evaluation_dataset)
+    evaluate_model(f"agent_state.pkl", evaluation_dataset)
 
 def main_menu():
     while True:
