@@ -63,6 +63,8 @@ class ForexTradingEnv(gym.Env):
         self.max_position_duration = 288  # Max duration for which a position can stay open
         self.window_size = 288  # Size of the window for observation data
         self.num_features = 25  # Number of features in the observation data
+        self.profit_streak = 0
+        self.loss_streak = 0
 
         # Define the action space of the environment
         self.action_space = spaces.Discrete(4)  # 0 - Buy, 1 - Sell, 2 - Close, 3 - Hold
@@ -485,22 +487,25 @@ class ForexTradingEnv(gym.Env):
         # Initialize the reward variable
         reward = 0
 
-        # Check if the current balance exceeds the initial balance by 10%
-        if self.balance > self.initial_balance * 1.10:  # 10% increase condition
-            reward += 1000  # Increase reward to signify the achievement of a higher target
-
-        # Basic reward for profit or loss on each step
+        # Directly link the reward to the profit or loss
         if self.trade_profit > 0:
-            reward += self.trade_profit * 0.01  # Scaling down the profit
+            reward += self.trade_profit * 0.01  # Reward scaled down profit
         elif self.trade_profit < 0:
-            reward += self.trade_profit * 0.01  # Scaling down the loss, already negative
+            reward += self.trade_profit * 0.02  # Increase the penalty scaling for losses
 
-        # Additional rewards or penalties based on action
+        # Add a large negative penalty if overall profit is negative
+        if self.balance < self.initial_balance:
+            # Calculate the net loss
+            net_loss = self.initial_balance - self.balance
+            # Apply a large penalty for net loss
+            reward -= net_loss * 0.05  # This multiplier is higher to emphasize the loss
+
+        # Adjust reward based on action
         if action == 2:  # Assuming '2' is the action to close the position
             # Calculate the difference between the current balance and the initial balance
             balance_difference = self.balance - self.initial_balance
-            # Scaled reward/penalty based on balance difference
-            reward += balance_difference * 0.01  # Scaling to adjust the impact
+            # Adjust the reward based on the balance difference
+            reward += balance_difference * 0.01  # Adjust the impact based on final financial outcome
 
         return reward
 
@@ -988,6 +993,7 @@ def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
 
     # Set the 'time' column as the DataFrame index and ensure its format is proper for datetime
     rates_frame.set_index('time', inplace=True)
+    # %Y-%m-%d %H:%M:%S
     rates_frame.index = pd.to_datetime(rates_frame.index, format="%Y-%m-%d %H:%M:%S")
 
     # Check if 'tick_volume' column is present in the fetched data
@@ -1115,7 +1121,8 @@ def read_csv_to_dataframe(file_path):
     df = pd.read_csv(file_path)
     # Set the 'time' column as the DataFrame index and ensure its format is proper for datetime
     df.set_index('time', inplace=True)
-    df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S")
+    # %Y-%m-%d %H:%M:%S
+    df.index = pd.to_datetime(df.index, format="%Y-%m-%d")
     return df
 
 def training_ppo_model(choice):
@@ -1146,7 +1153,7 @@ def training_ppo_model(choice):
         # Prompt the user for the currency pair they're interested in and standardize the input
         Pair = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
 
-        training_start_date = "2023-01-01"
+        training_start_date = "2000-01-01"
         training_end_date = current_date
 
         # Fetch and prepare the FX data for the specified currency pair and timeframe
@@ -1186,7 +1193,7 @@ def training_ppo_model(choice):
     min_epsilon = 0.01
 
     # Re-calculate using the provided formula and rounding the result to the nearest whole number
-    episodes = math.ceil(math.log(min_epsilon / initial_epsilon) / math.log(decay_rate))
+    episodes = math.ceil(math.log(min_epsilon / initial_epsilon) / math.log(decay_rate)) + 20
 
     train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str)
 
