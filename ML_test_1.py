@@ -1187,6 +1187,7 @@ def split_and_save_dataset(dataset, timeframe, pair):
         os.remove(file)
 
     # Save the sets into CSV files
+    dataset.to_csv(f'Full_data.csv', index=True)
     final_training_set.to_csv(f'training_{pair}_{timeframe}_data.csv', index=True)
     validation_set.to_csv(f'validation_{pair}_{timeframe}_data.csv', index=True)
     testing_set.to_csv(f'testing_{pair}_{timeframe}_data.csv', index=True)
@@ -1203,7 +1204,7 @@ def read_csv_to_dataframe(file_path):
     df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S")
     return df
 
-def training_ppo_model(choice):
+def training_DQN_model(choice):
     if choice == '1':
         # Retrieve and store the current date
         current_date = str(datetime.now().date())
@@ -1277,42 +1278,47 @@ def training_ppo_model(choice):
 
     train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str)
 
-def evaluate_ppo_model():
-    # Search for CSV files starting with "testing"
-    testing_files = glob.glob('testing*.csv')
+def evaluate_DQN_model(choice):
+    if choice == '2':
+        # Search for CSV files starting with "testing"
+        testing_files = glob.glob('testing*.csv')
 
-    for file in testing_files:
-        parts = file.split('_')
+        for file in testing_files:
+            parts = file.split('_')
 
-        # Extract the pair and timeframe
-        Pair = parts[1]
-        timeframe_str = parts[2]
+            # Extract the pair and timeframe
+            Pair = parts[1]
+            timeframe_str = parts[2]
 
+            evaluation_dataset = read_csv_to_dataframe(file)
+    elif choice == '4':
+        file = 'Full_data.csv'
         evaluation_dataset = read_csv_to_dataframe(file)
+        
     
     evaluate_model(f"agent_state.pkl", evaluation_dataset)
 
 def main_menu():
     while True:
         print("\nMain Menu:")
-        print("1 - Train a PPO model with latest data")
-        print("2 - Evaluate a PPO model")
-        print("3 - Train a PPO model with csv file data")
-        print("4 - Exit")
+        print("1 - Train a DQN model with latest data")
+        print("2 - Evaluate a DQN model - Validate data")
+        print("3 - Train a DQN model with csv file data")
+        print("4 - Evaluate a DQN model - Full data")
 
         choice = input("Enter your choice (1/2/3/4): ")
 
         if choice == '1':
-            training_ppo_model(choice)
+            training_DQN_model(choice)
             break
         elif choice == '2':
-            evaluate_ppo_model()
+            evaluate_DQN_model(choice)
             break
         elif choice == '3':
-            training_ppo_model(choice)
+            training_DQN_model(choice)
             break
         elif choice == '4':
-            print("Exiting...")
+            evaluate_DQN_model(choice)
             break
         else:
             print("Invalid choice. Please enter 1, 2, 3, or 4.")
