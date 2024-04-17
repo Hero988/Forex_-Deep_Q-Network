@@ -18,10 +18,9 @@ from dateutil.relativedelta import relativedelta
 import matplotlib.pyplot as plt
 import glob
 import matplotlib.dates as mdates
-import time
 import random
 from collections import deque
-import math
+from torch.utils.tensorboard import SummaryWriter
 
 # Define the ForexTradingEnv class, inheriting from gym.Env to create a custom trading environment
 class ForexTradingEnv(gym.Env):
@@ -65,6 +64,9 @@ class ForexTradingEnv(gym.Env):
         self.num_features = 25  # Number of features in the observation data
         self.profit_streak = 0
         self.loss_streak = 0
+        self.final_profit = 0
+        self.worst_case_pnl = 0
+        self.best_case_pnl = 0
 
         # Define the action space of the environment
         self.action_space = spaces.Discrete(4)  # 0 - Buy, 1 - Sell, 2 - Close, 3 - Hold
@@ -84,19 +86,20 @@ class ForexTradingEnv(gym.Env):
             self.__dict__.update(state_dict)  # Update the environment's dictionary with the loaded state
 
     def update_current_pnl(self, high_price, low_price):
-        if self.position == 'long':  
-            # For a long position, the worst-case loss would occur at the lowest price.
-            worst_case_price = low_price
-            # Calculate the P&L as if the lowest price was the closing price for the position.
-            self.current_pnl = (worst_case_price - self.entry_price) * self.accumulated_lot_size - self.transaction_cost
-        elif self.position == 'short':  
-            # For a short position, the worst-case loss would occur at the highest price.
-            worst_case_price = high_price
-            # Calculate the P&L as if the highest price was the closing price for the position.
-            self.current_pnl = (self.entry_price - worst_case_price) * self.accumulated_lot_size - self.transaction_cost
-        else:  
-            # If there is no open position, set current P&L to 0.
-            self.current_pnl = 0
+        if self.position == 'long':
+            # Worst-case loss for a long position at the lowest price
+            self.worst_case_pnl = (low_price - self.entry_price) * self.accumulated_lot_size - self.transaction_cost
+            # Best-case profit for a long position at the highest price
+            self.best_case_pnl = (high_price - self.entry_price) * self.accumulated_lot_size - self.transaction_cost
+        elif self.position == 'short':
+            # Worst-case loss for a short position at the highest price
+            self.worst_case_pnl = (self.entry_price - high_price) * self.accumulated_lot_size - self.transaction_cost
+            # Best-case profit for a short position at the lowest price
+            self.best_case_pnl = (self.entry_price - low_price) * self.accumulated_lot_size - self.transaction_cost
+        else:
+            # If there is no open position, set both PnLs to 0
+            self.worst_case_pnl = 0
+            self.best_case_pnl = 0
 
     # Define a method to execute a trade based on the action, current market price
     def execute_trade(self, action, current_price, high_price, low_price):
@@ -117,12 +120,6 @@ class ForexTradingEnv(gym.Env):
         max_lot_size = 10000  # Maximum lot size for a trade
 
         self.lot_size = max_lot_size  # or a predetermined static value within the range
-
-        # Update the current profit and loss (P&L) based on the current market price
-        self.update_current_pnl(high_price, low_price)
-
-        # Append the current P&L to the history of P&Ls to keep a record over time
-        self.pnl_history.append(self.current_pnl)
 
         # If the current balance is greater than the peak balance, update the peak balance to the current balance
         if self.current_balance > self.peak_balance:
@@ -148,7 +145,8 @@ class ForexTradingEnv(gym.Env):
                 'Balance': self.balance,  # Record the current balance of the account
                 'Date': self.data.index[self.current_step].strftime('%Y-%m-%d'),  # Format and record the current date
                 'lot_size': 0,  # Indicate that no lot size is applicable for hold actions
-                'current_pnl': self.current_pnl
+                'worst_case_pnl': self.worst_case_pnl,
+                'best_case_pnl': self.best_case_pnl
             })
 
         # Check if the accumulated lot size exceeds the maximum allowed limit
@@ -230,7 +228,8 @@ class ForexTradingEnv(gym.Env):
             'SL Price': self.sl_price,  # Record the calculated stop loss price
             'TP Price': self.tp_price,  # Record the calculated take profit price
             'is_open': self.is_open_position,  # Indicate that this trade entry is currently open
-            'current_pnl': self.current_pnl
+            'worst_case_pnl': self.worst_case_pnl,
+            'best_case_pnl': self.best_case_pnl
         })
 
     # Define a method to close any open trading position at a given price
@@ -314,7 +313,6 @@ class ForexTradingEnv(gym.Env):
         # Clear the step at which the position was opened
         self.position_open_step = None
 
-
     # Define a method to reset the environment to its initial state
     def reset(self):
         # Reset the account balance to the initial balance
@@ -337,7 +335,6 @@ class ForexTradingEnv(gym.Env):
         assert observation.shape == (self.observation_space.shape[0],), f"Observation shape mismatch: {observation.shape} != {self.observation_space.shape}"
         # Return the observation to the caller, typically for starting a new episode
         return observation
-
 
     # Define a method to get the next observation from the data
     def _next_observation(self):
@@ -370,11 +367,9 @@ class ForexTradingEnv(gym.Env):
 
     # Define a method to take a step in the environment based on an action
     def step(self, action, trade_history):
+        final_reward = 0
         # Reset the flag indicating whether a position was closed recently
         self.position_closed_recently = False
-
-        # Determine if the simulation is done based on the remaining data
-        done = self.current_step >= len(self.data) - 5
 
         # Get the current price from the data using the 'close' column
         current_price = self.data['close'].iloc[self.current_step]
@@ -384,13 +379,40 @@ class ForexTradingEnv(gym.Env):
 
         low_price = self.data['low'].iloc[self.current_step]
 
+        # Update the current profit and loss (P&L) based on the current market price
+        self.update_current_pnl(high_price, low_price)
+
+        worst_balance = self.balance + self.worst_case_pnl
+
+        best_balance = self.balance + self.best_case_pnl
+
+        # Check if the best case scenario achieves the profit target
+        if best_balance >= self.profit_target + self.initial_balance:
+            done = True
+            self.balance = best_balance
+            print("Episode terminated: Profit target achieved in best case scenario.")
+        # Check if the worst case scenario drops below the allowed loss limit
+        elif worst_balance <= self.initial_balance - self.max_loss_limit:
+            done = True
+            self.balance = worst_balance
+            print("Episode terminated: Loss limit breached in worst case scenario.")
+        else:
+            # Continue the episode if neither condition is met
+            done = self.current_step >= len(self.data) - 5  # Check if there are enough steps left
+
         # Format the current date as a string
         current_date = self.data.index[self.current_step].strftime('%Y-%m-%d')
         # Execute the trade based on the provided action
         self.execute_trade(action, current_price, high_price, low_price)
 
+        #if done:
+            #self.evaluate_performance()
+            #final_reward = self.calculate_final_reward() 
+            
         # Calculate the reward for the current step
         step_reward = self.calculate_step_reward(action, trade_history, self.current_step)
+
+        reward = step_reward + final_reward
 
         # Log the trade action taken
         self.log_trade(self.current_step, action, current_price, self.balance, current_date, self.lot_size)
@@ -401,7 +423,7 @@ class ForexTradingEnv(gym.Env):
         # Ensure the shape of the next observation matches the expected observation space shape
         assert next_observation.shape == (self.observation_space.shape[0],), f"Next observation shape mismatch: {next_observation.shape} != {self.observation_space.shape}"
         # Return the next observation, the step reward, the done flag, and an empty info dict
-        return next_observation, step_reward, done, {}
+        return next_observation, reward, done, {}
 
     # Define a method to evaluate and summarize the trading performance
     def evaluate_performance(self):
@@ -457,12 +479,12 @@ class ForexTradingEnv(gym.Env):
         percent_profitable = (win_count / number_of_closed_trades * 100) if number_of_closed_trades > 0 else 0  # Calculate the percentage of profitable trades
 
         # Calculate final profit by subtracting the initial balance from the final balance
-        final_profit = self.balance - self.initial_balance
+        self.final_profit = self.balance - self.initial_balance
 
         # Return a dictionary summarizing the performance metrics
         return {
                 "Final Balance": self.balance,  # The final account balance
-                "Final Profit": final_profit,  # The net profit or loss
+                "Final Profit": self.final_profit,  # The net profit or loss
                 "Maximum Drawdown": f"{drawdown:.2f}%",  # The maximum drawdown in percentage
                 "Highest Daily Loss": f"{highest_daily_loss:.2f}%",  # The highest daily loss in percentage
                 "Profit Factor": f"{profit_factor:.2f}" if profit_factor != float('inf') else "Inf",  # The profit factor
@@ -487,28 +509,36 @@ class ForexTradingEnv(gym.Env):
         # Initialize the reward variable
         reward = 0
 
+        if self.balance > self.initial_balance:
+            net_profit = self.balance - self.initial_balance
+            reward += net_profit * 0.01
+        elif self.balance < self.initial_balance:
+            net_profit = self.balance - self.initial_balance
+            reward += net_profit * 0.01
+
         # Directly link the reward to the profit or loss
         if self.trade_profit > 0:
-            reward += self.trade_profit * 0.01  # Reward scaled down profit
+            reward += self.trade_profit * 0.01
         elif self.trade_profit < 0:
-            reward += self.trade_profit * 0.02  # Increase the penalty scaling for losses
+            reward += self.trade_profit * 0.01
 
-        # Add a large negative penalty if overall profit is negative
-        if self.balance < self.initial_balance:
-            # Calculate the net loss
+        # Check for hitting profit or loss targets
+        if self.balance >= self.profit_target + self.initial_balance:
+            net_profit = self.balance - self.initial_balance
+            reward += net_profit
+        elif self.balance <= self.initial_balance - self.max_loss_limit:
             net_loss = self.initial_balance - self.balance
-            # Apply a large penalty for net loss
-            reward -= net_loss * 0.05  # This multiplier is higher to emphasize the loss
-
-        # Adjust reward based on action
-        if action == 2:  # Assuming '2' is the action to close the position
-            # Calculate the difference between the current balance and the initial balance
-            balance_difference = self.balance - self.initial_balance
-            # Adjust the reward based on the balance difference
-            reward += balance_difference * 0.01  # Adjust the impact based on final financial outcome
+            reward += net_loss
 
         return reward
-
+    
+    #def calculate_final_reward(self):
+        #reward = 0
+        #if self.final_profit > 0 or self.final_profit < 0 :
+            #reward += self.final_profit
+        
+        #return reward
+        
 class DQN(nn.Module):
     def __init__(self, input_dim, action_dim):
         super(DQN, self).__init__()
@@ -552,9 +582,11 @@ class DQNAgent:
         self.min_epsilon = min_epsilon
 
     def update(self):
+        # Check if enough samples are available in the buffer
         if len(self.replay_buffer) < self.batch_size:
-            return
+            return None  # Not enough samples to perform an update
 
+        # Sample a batch of transitions from the replay buffer
         transitions = self.replay_buffer.sample(self.batch_size)
         batch_state, batch_action, batch_reward, batch_next_state, batch_done = zip(*transitions)
 
@@ -565,15 +597,24 @@ class DQNAgent:
         batch_next_state = torch.tensor(np.array(batch_next_state), dtype=torch.float32)
         batch_done = torch.tensor(np.array(batch_done), dtype=torch.float32)
 
+        # Compute current Q-values using the policy network
         current_q_values = self.model(batch_state).gather(1, batch_action.unsqueeze(1)).squeeze(1)
-        next_q_values = self.target_model(batch_next_state).max(1)[0]
+        
+        # Compute next Q-values using the target network, and detach from the graph
+        next_q_values = self.target_model(batch_next_state).max(1)[0].detach()
+        
+        # Compute the expected Q-values
         expected_q_values = batch_reward + self.gamma * next_q_values * (1 - batch_done)
 
-        loss = nn.MSELoss()(current_q_values, expected_q_values.detach())
+        # Compute loss using Mean Squared Error
+        loss = nn.MSELoss()(current_q_values, expected_q_values)
 
+        # Perform gradient descent
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+
+        return loss.item()  # Return the loss value as a Python float for monitoring
 
     def sync_target_model(self):
         self.target_model.load_state_dict(self.model.state_dict())
@@ -585,8 +626,9 @@ class DQNAgent:
             action = q_values.max(1)[1].item()
         else:
             action = random.randrange(self.action_dim)
-        return action
-    
+            q_values = np.zeros(self.action_dim)  # This ensures q_values is always an array
+        return action, q_values
+        
     def decay_epsilon(self):
         """Decays the epsilon value by the decay rate until it reaches a minimum value."""
         self.epsilon = max(self.epsilon * self.decay_rate, self.min_epsilon)
@@ -646,7 +688,7 @@ def validate_agent(agent_save_filename, testing_set):
         # Continue the loop until the episode ends (the 'done' flag is True)
         while not done:
             # Select an action based on the current state using the agent's policy
-            action = agent_evaluation.act(state)
+            action, _ = agent_evaluation.act(state)
             # Temporary storage for out-of-sample trade history
             out_of_sample_trade_history = env_out_of_sample.trade_history
             # Execute the selected action in the environment and observe the next state and reward
@@ -685,6 +727,8 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
         # Initialize the PPO agent with the specified input dimension and action space size
         agent = DQNAgent(input_dim, 4)
 
+        writer = SummaryWriter()  # Initialize TensorBoard
+
         # Initialize a variable to keep track of the total number of steps taken during training
         total_steps = 0
 
@@ -696,22 +740,15 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
             state = env_in_sample.reset()
             all_observations.append(state)
             
-            # Reset the environment again for consistency
-            state_in_sample = env_in_sample.reset()
             # Initialize total reward for the episode
             total_reward = 0
             # Flag to indicate if the episode is done
             done = False
 
-            # Skip episodes with NaN values in the in-sample data
-            if training_set.isnull().values.any():
-                print(f"Skipping episode {e+1} due to NaN values in in-sample data.")
-                continue
-
             # Main loop to interact with the environment until the episode ends
             while not done:
                 # Agent selects an action based on the current state
-                action = agent.act(state)
+                action, _ = agent.act(state)
 
                 # Fetch the current trade history from the environment
                 in_sample_trade_history = env_in_sample.trade_history
@@ -725,19 +762,25 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
                 # Accumulate the total reward
                 total_reward += reward
 
-                # Increment the total steps counter
-                total_steps += 1
+                loss = agent.update()
+
+                if loss is not None:
+                    writer.add_scalar('Loss/step', loss, total_steps)
 
                 # Update the state for the next iteration
                 state = next_state
-                # Desired batch size for training the agent, considering replay buffer size
-                desired_batch_size = 51
-                # Check if the replay buffer has enough experiences to start training
-                if len(agent.replay_buffer) > desired_batch_size:
-                    # Train the agent using the collected experiences from the replay buffer
-                    agent.update()
 
-                agent.decay_epsilon()
+                # Increment the total steps counter
+                total_steps += 1
+
+            agent.decay_epsilon()
+
+            current_epsilon = agent.epsilon
+
+            if current_epsilon is not None:
+                writer.add_scalar('Epsilon/step', current_epsilon, total_steps)
+
+            writer.add_scalar('Reward/Episode', total_reward, e)
 
             agent_save_filename = os.path.join(f"agent_state.pkl")
                 
@@ -755,13 +798,13 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
 
             print(f'epoch {e} total training reward is {total_reward} and total profit is {total_in_sample_profit} and total validation reward is {total_test_reward} and total profit is {total_out_of_sample_profit_number}')
 
-            """
-            if total_test_reward < best_validation_score:
+            
+            if total_test_reward > best_validation_score:
                 best_validation_score = total_test_reward
-                episodes_without_improvement = 0
                 
                 # Define the directory to save the model based on some parameters
                 save_dir = os.path.join("saved_models", f"{Pair}_{timeframe_str}")
+
                 # Check if this directory exists, if not, create it
                 if not os.path.exists(save_dir):
                     os.makedirs(save_dir)
@@ -772,14 +815,9 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
                 # Save the state of the agent
                 agent.save_state(agent_save_filename_best)
                 print(f"Saved improved model to {agent_save_filename_best}")
-            else:
-                episodes_without_improvement += 1
 
-            if episodes_without_improvement >= patience:
-                print("Early stopping triggered")
-                break  # Exit the training loop if patience is exceeded
-            """
-
+        writer.close()  # Close the TensorBoard writer
+            
 def evaluate_model(agent_save_filename, testing_set):
         # Initialize the trading environment with out-of-sample data
         env_out_of_sample = ForexTradingEnv(testing_set)
@@ -802,6 +840,9 @@ def evaluate_model(agent_save_filename, testing_set):
 
         # Initialize a list to store all observations during out-of-sample testing
         all_observations = []
+        all_actions = []
+        all_rewards = []
+        all_q_values = []
 
         # Reset the environment to get the initial state for out-of-sample testing
         state = env_out_of_sample.reset()
@@ -813,7 +854,7 @@ def evaluate_model(agent_save_filename, testing_set):
         # Continue the loop until the episode ends (the 'done' flag is True)
         while not done:
             # Select an action based on the current state using the agent's policy
-            action = agent_evaluation.act(state)  # No exploration
+            action, q_values = agent_evaluation.act(state)  # No exploration
             # Temporary storage for out-of-sample trade history
             out_of_sample_trade_history = env_out_of_sample.trade_history
 
@@ -823,6 +864,11 @@ def evaluate_model(agent_save_filename, testing_set):
             total_test_reward += reward
             # Record the next state for later analysis
             all_observations.append(next_state)
+
+            all_observations.append(next_state)
+            all_actions.append(action)
+            all_rewards.append(reward)
+            all_q_values.append(q_values)
 
             # Update the current state to the next state to continue the loop
             state = next_state
@@ -911,15 +957,47 @@ def evaluate_model(agent_save_filename, testing_set):
         # Save the DataFrame to a CSV file at the specified path
         df_out_of_sample.to_csv(out_of_sample_filename, index=False)
 
+        # Plotting the actions and rewards
+        plt.figure(figsize=(14, 7))
+        plt.subplot(2, 1, 1)
+        plt.plot(all_rewards, label='Rewards')
+        plt.title('Rewards per Step')
+        plt.xlabel('Step')
+        plt.ylabel('Reward')
+        plt.legend()
+
+        plt.subplot(2, 1, 2)
+        plt.plot(all_actions, label='Actions', marker='o')
+        plt.title('Actions per Step')
+        plt.xlabel('Step')
+        plt.ylabel('Action')
+        plt.legend()
+
+        plt.tight_layout()
+        # Construct the filename using the total reward and the unique identifier
+        plot_filename = os.path.join(specific_folder_name_validation, f"Evaluation_Rewards_and_Actions_per_Step.png")
+
+        # Save the plot to the specified file
+        plt.savefig(plot_filename)
+        plt.close()  # Close the plot to free up system resources
+
+        # Optionally print detailed decision data
+        decision_data = pd.DataFrame({
+            'Actions': all_actions,
+            'Rewards': all_rewards,
+            'Q-Values': [list(qv) for qv in all_q_values]  # Convert each tensor of Q-values to list
+        })
+        print(decision_data)
+
 # Define a function to fetch and prepare FX data from MT5 for a given symbol and timeframe
 def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
 
     # Define your MetaTrader 5 account number
-    account_number = 1520146991
+    account_number = 530062481
     # Define your MetaTrader 5 password
-    password = 'HWrpmybVOs9*'
+    password = 'N?G9rPt@'
     # Define the server name associated with your MT5 account
-    server_name ='FTMO-Demo2'
+    server_name ='FTMO-Server3'
 
     # Initialize MT5 connection; if it fails, print error message and exit
     if not mt5.initialize():
@@ -1122,7 +1200,7 @@ def read_csv_to_dataframe(file_path):
     # Set the 'time' column as the DataFrame index and ensure its format is proper for datetime
     df.set_index('time', inplace=True)
     # %Y-%m-%d %H:%M:%S
-    df.index = pd.to_datetime(df.index, format="%Y-%m-%d")
+    df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S")
     return df
 
 def training_ppo_model(choice):
@@ -1153,7 +1231,7 @@ def training_ppo_model(choice):
         # Prompt the user for the currency pair they're interested in and standardize the input
         Pair = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
 
-        training_start_date = "2000-01-01"
+        training_start_date = "2023-01-01"
         training_end_date = current_date
 
         # Fetch and prepare the FX data for the specified currency pair and timeframe
@@ -1193,7 +1271,9 @@ def training_ppo_model(choice):
     min_epsilon = 0.01
 
     # Re-calculate using the provided formula and rounding the result to the nearest whole number
-    episodes = math.ceil(math.log(min_epsilon / initial_epsilon) / math.log(decay_rate)) + 20
+    #episodes = math.ceil(math.log(min_epsilon / initial_epsilon) / math.log(decay_rate)) + 20
+
+    episodes = 1000
 
     train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str)
 
