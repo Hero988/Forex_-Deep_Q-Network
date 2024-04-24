@@ -5,7 +5,6 @@ from datetime import datetime
 import gymnasium as gym
 import pytz
 import numpy as np
-import torch.nn.functional as F
 import torch.nn as nn
 from gym import spaces
 import pickle
@@ -13,7 +12,6 @@ import torch
 import pandas_ta as ta
 import torch.optim as optim
 import os
-from torch.distributions import Categorical
 from dateutil.relativedelta import relativedelta
 import matplotlib.pyplot as plt
 import glob
@@ -21,6 +19,7 @@ import matplotlib.dates as mdates
 import random
 from collections import deque
 from torch.utils.tensorboard import SummaryWriter
+import time
 
 # Define the ForexTradingEnv class, inheriting from gym.Env to create a custom trading environment
 class ForexTradingEnv(gym.Env):
@@ -28,7 +27,7 @@ class ForexTradingEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
     # Constructor with parameters for initializing the environment
-    def __init__(self, data, initial_balance=10000, leverage=100, transaction_cost=0.0002, stop_loss_percent=0.5, take_profit_percent=1, lot_size=1000):
+    def __init__(self, data, num_features=0, window_size=24, initial_balance=10000, leverage=100, transaction_cost=0.0002, stop_loss_percent=0.5, take_profit_percent=1, lot_size=1000):
         # Call the constructor of the superclass
         super(ForexTradingEnv, self).__init__()
 
@@ -59,14 +58,16 @@ class ForexTradingEnv(gym.Env):
         self.pnl_history = [0]  # History of profit and loss, starting with 0
         self.trade_profit = 0  # Profit from the current trade, initialized to 0
         self.position_closed_recently = False  # Flag to indicate if a position was closed recently
-        self.max_position_duration = 288  # Max duration for which a position can stay open
-        self.window_size = 288  # Size of the window for observation data
-        self.num_features = 25  # Number of features in the observation data
+        self.window_size = window_size  # Size of the window for observation data
+        self.num_features = num_features # Number of features in the observation data (7 for no indicators, 25 with indicators)
         self.profit_streak = 0
         self.loss_streak = 0
         self.final_profit = 0
         self.worst_case_pnl = 0
         self.best_case_pnl = 0
+        self.daily_pnl = 0  # Initialize daily profit and loss
+        self.last_processed_date = None  # Keep track of the last processed date
+        self.daily_loss_limit_reached = False
 
         # Define the action space of the environment
         self.action_space = spaces.Discrete(4)  # 0 - Buy, 1 - Sell, 2 - Close, 3 - Hold
@@ -272,7 +273,7 @@ class ForexTradingEnv(gym.Env):
                 'Balance': self.balance,  # Record the updated balance after closing the position
                 'Date': self.data.index[self.current_step].strftime('%Y-%m-%d'),  # Record the date of the position closing
                 'lot_size': self.accumulated_lot_size,  # Record the lot size of the position that was closed
-                'Closed Balance': self.balance  # Record the balance after the position was closed
+                'Closed Balance': self.balance,  # Record the balance after the position was closed
             })
 
             # Reset attributes related to the position
@@ -379,12 +380,27 @@ class ForexTradingEnv(gym.Env):
 
         low_price = self.data['low'].iloc[self.current_step]
 
+        current_datetime = self.data.index[self.current_step]
+
+        current_date = current_datetime.date()  # Assuming datetime index
+
+        # Check for date change
+        if self.last_processed_date is None or self.last_processed_date != current_date:
+            # Reset daily P&L if it's a new day
+            if self.last_processed_date is not None:  # Ensure it's not the first step
+                self.daily_pnl = 0
+
+        # Update last processed date
+        self.last_processed_date = current_date
+
         # Update the current profit and loss (P&L) based on the current market price
         self.update_current_pnl(high_price, low_price)
 
         worst_balance = self.balance + self.worst_case_pnl
 
         best_balance = self.balance + self.best_case_pnl
+
+        self.daily_pnl += self.worst_case_pnl
 
         # Check if the best case scenario achieves the profit target
         if best_balance >= self.profit_target + self.initial_balance:
@@ -396,6 +412,10 @@ class ForexTradingEnv(gym.Env):
             done = True
             self.balance = worst_balance
             print("Episode terminated: Loss limit breached in worst case scenario.")
+        elif self.daily_pnl < -self.max_daily_loss_limit:
+            done = True
+            self.daily_loss_limit_reached = True
+            print("Episode terminated: Daily Loss limit breached in worst case scenario.")
         else:
             # Continue the episode if neither condition is met
             done = self.current_step >= len(self.data) - 5  # Check if there are enough steps left
@@ -509,6 +529,13 @@ class ForexTradingEnv(gym.Env):
         # Initialize the reward variable
         reward = 0
 
+        if self.daily_loss_limit_reached:
+            reward += -self.max_daily_loss_limit
+
+        if self.daily_loss_limit_reached:
+            net_profit = self.balance - self.initial_balance
+            reward += net_profit
+
         if self.balance > self.initial_balance:
             net_profit = self.balance - self.initial_balance
             reward += net_profit * 0.01
@@ -531,13 +558,6 @@ class ForexTradingEnv(gym.Env):
             reward += net_loss
 
         return reward
-    
-    #def calculate_final_reward(self):
-        #reward = 0
-        #if self.final_profit > 0 or self.final_profit < 0 :
-            #reward += self.final_profit
-        
-        #return reward
         
 class DQN(nn.Module):
     def __init__(self, input_dim, action_dim):
@@ -654,8 +674,9 @@ class DQNAgent:
     # Define a function to evaluate the agent on out-of-sample data
     
 def validate_agent(agent_save_filename, testing_set):
+        num_columns = len(testing_set.columns)
         # Initialize the trading environment with out-of-sample data
-        env_out_of_sample = ForexTradingEnv(testing_set)
+        env_out_of_sample = ForexTradingEnv(testing_set, num_columns)
 
         observation_space_shape = env_out_of_sample.observation_space.shape[0]  # Or any other method to find the total features per timestep.
 
@@ -669,9 +690,6 @@ def validate_agent(agent_save_filename, testing_set):
 
         # Load the saved agent state for evaluation
         agent_evaluation.load_state(agent_save_filename, reset_epsilon=True, new_epsilon=0)
-
-        # Print a message indicating the start of out-of-sample testing
-        print("Transitioning to validate testing...")
 
         # Initialize the done flag to False
         done = False
@@ -710,12 +728,10 @@ def validate_agent(agent_save_filename, testing_set):
         return total_test_reward, final_profit_evaluation
 
 def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str):
+        num_columns = len(training_set.columns)
         # Instantiate the trading environment with in-sample data
-        env_in_sample = ForexTradingEnv(training_set)
+        env_in_sample = ForexTradingEnv(training_set, num_columns)
         best_validation_score = -float('inf')
-        episodes_without_improvement = 0
-        patience = 10  # Number of episodes to tolerate no improvement in validation score
-        validation_frequency = 5  # Define how often to validate (e.g., every 5 epochs)
 
         # Initialize a list to store observations collected during training
         all_observations = []
@@ -782,7 +798,7 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
 
             writer.add_scalar('Reward/Episode', total_reward, e)
 
-            agent_save_filename = os.path.join(f"agent_state.pkl")
+            agent_save_filename = os.path.join(f"agent_state_{Pair}_{timeframe_str}.pkl")
                 
             agent.save_state(agent_save_filename)  # Save the current best model state to the specified path.
 
@@ -815,12 +831,27 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
                 # Save the state of the agent
                 agent.save_state(agent_save_filename_best)
                 print(f"Saved improved model to {agent_save_filename_best}")
+            elif total_in_sample_profit > 1000 or total_out_of_sample_profit_number > 1000:
+                # Define the directory to save the model based on some parameters
+                save_dir = os.path.join("saved_models", f"{Pair}_{timeframe_str}")
+
+                # Check if this directory exists, if not, create it
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                
+                # Construct the filename with the best validation score included
+                agent_save_filename_best = os.path.join(save_dir, f"agent_state_best_{Pair}_{timeframe_str}_{total_in_sample_profit:.2f}_ {total_out_of_sample_profit_number:.2f}.pkl")
+                
+                # Save the state of the agent
+                agent.save_state(agent_save_filename_best)
+                print(f"Saved improved model to {agent_save_filename_best}")
 
         writer.close()  # Close the TensorBoard writer
             
 def evaluate_model(agent_save_filename, testing_set):
+        num_columns = len(testing_set.columns)
         # Initialize the trading environment with out-of-sample data
-        env_out_of_sample = ForexTradingEnv(testing_set)
+        env_out_of_sample = ForexTradingEnv(testing_set, num_columns)
 
         observation_space_shape = env_out_of_sample.observation_space.shape[0]  # Or any other method to find the total features per timestep.
 
@@ -989,7 +1020,6 @@ def evaluate_model(agent_save_filename, testing_set):
         })
         print(decision_data)
 
-# Define a function to fetch and prepare FX data from MT5 for a given symbol and timeframe
 def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
 
     # Define your MetaTrader 5 account number
@@ -1086,7 +1116,6 @@ def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
     # Return the prepared DataFrame containing the rates
     return rates_frame
 
-# Defines a function to prompt the user for a date input and ensure it's in the correct format
 def get_user_date_input(prompt):
     # Specify the expected date format
     date_format = '%Y-%m-%d'
@@ -1104,7 +1133,6 @@ def get_user_date_input(prompt):
             date_str = input(prompt)
 
 def calculate_indicators(data, bollinger_length=12, bollinger_std_dev=1.5, sma_trend_length=50, window=9):
-    print("Doing calculate_indicators function")
     # Calculate the 50-period simple moving average of the 'close' price
     data['SMA_50'] = ta.sma(data['close'], length=50)
     # Calculate the 200-period simple moving average of the 'close' price
@@ -1198,55 +1226,21 @@ def split_and_save_dataset(dataset, timeframe, pair):
 def read_csv_to_dataframe(file_path):
     # Read the CSV file into a DataFrame and set the first column as the index
     df = pd.read_csv(file_path)
-    # Set the 'time' column as the DataFrame index and ensure its format is proper for datetime
+    # Set the 'time' column as the DataFrame index
     df.set_index('time', inplace=True)
-    # %Y-%m-%d %H:%M:%S
-    df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S")
+    
+    try:
+        # Try to convert the index using the first datetime format
+        df.index = pd.to_datetime(df.index, format="%Y-%m-%d")
+    except ValueError:
+        # If there is a ValueError, try the second datetime format
+        df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S")
+    
     return df
 
 def training_DQN_model(choice):
     if choice == '1':
-        # Retrieve and store the current date
-        current_date = str(datetime.now().date())
-        current_date_datetime = datetime.now().date()
-
-        # Calculate the date for one month before the current date
-        one_month_before = current_date_datetime - relativedelta(months=1)
-        # Convert to string if needed
-        one_month_before_str = str(one_month_before)
-
-        # Hardcoded start date for strategy evaluation
-        strategy_start_date_all = "1971-01-04"
-        # Use the current date as the end date for strategy evaluation
-        strategy_end_date_all = current_date
-
-        # Convert string representation of dates to datetime objects for further processing
-        start_date_all = datetime.strptime(strategy_start_date_all, "%Y-%m-%d")
-        end_date_all = datetime.strptime(strategy_end_date_all, "%Y-%m-%d")
-
-        # Prompt the user to decide if they want real-time data updates and store the boolean result
-        #enable_real_time = input("Do you want to enable real-time data updates? (yes/no): ").lower().strip() == 'yes'
-
-        # Prompt the user for the desired timeframe for analysis and standardize the input
-        timeframe_str = input("Enter the currency pair (e.g., Daily, 1H): ").strip().upper()
-        # Prompt the user for the currency pair they're interested in and standardize the input
-        Pair = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
-
-        training_start_date = "2023-01-01"
-        training_end_date = current_date
-
-        # Fetch and prepare the FX data for the specified currency pair and timeframe
-        eur_usd_data = fetch_fx_data_mt5(Pair, timeframe_str, start_date_all, end_date_all)
-
-        # Apply technical indicators to the data using the 'calculate_indicators' function
-        eur_usd_data = calculate_indicators(eur_usd_data) 
-
-        # Filter the EUR/USD data for the in-sample training period
-        dataset = eur_usd_data[(eur_usd_data.index >= training_start_date) & (eur_usd_data.index <= training_end_date)]
-
-        dataset = dataset.fillna(0)
-
-        training_set, testing_set = split_and_save_dataset(dataset, timeframe_str, Pair)
+       training_set, testing_set, Pair, timeframe_str = get_data()
     elif choice == '3':
         # Search for CSV files starting with "validation"
         validation_files = glob.glob('validation*.csv')
@@ -1266,14 +1260,6 @@ def training_DQN_model(choice):
         for file in training_files:
             training_set = read_csv_to_dataframe(file)
 
-    # Reinitializing the variables for calculation
-    initial_epsilon = 0.1
-    decay_rate = 0.99
-    min_epsilon = 0.01
-
-    # Re-calculate using the provided formula and rounding the result to the nearest whole number
-    #episodes = math.ceil(math.log(min_epsilon / initial_epsilon) / math.log(decay_rate)) + 20
-
     episodes = 1000
 
     train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str)
@@ -1292,11 +1278,64 @@ def evaluate_DQN_model(choice):
 
             evaluation_dataset = read_csv_to_dataframe(file)
     elif choice == '4':
-        file = 'Full_data.csv'
-        evaluation_dataset = read_csv_to_dataframe(file)
+
+        # Search for CSV files starting with "testing"
+        testing_files = glob.glob('testing*.csv')
+
+        for file in testing_files:
+            parts = file.split('_')
+
+            # Extract the pair and timeframe
+            Pair = parts[1]
+            timeframe_str = parts[2]
+
+        file_data = 'Full_data.csv'
+        evaluation_dataset = read_csv_to_dataframe(file_data)
         
     
-    evaluate_model(f"agent_state.pkl", evaluation_dataset)
+    evaluate_model(f"agent_state_{Pair}_{timeframe_str}.pkl", evaluation_dataset)
+
+def get_data():
+    # Retrieve and store the current date
+    current_date = str(datetime.now().date())
+    current_date_datetime = datetime.now().date()
+
+    # Calculate the date for one month before the current date
+    one_month_before = current_date_datetime - relativedelta(months=1)
+    # Convert to string if needed
+    one_month_before_str = str(one_month_before)
+
+    # Hardcoded start date for strategy evaluation
+    strategy_start_date_all = "1971-01-04"
+    # Use the current date as the end date for strategy evaluation
+    strategy_end_date_all = current_date
+
+    # Convert string representation of dates to datetime objects for further processing
+    start_date_all = datetime.strptime(strategy_start_date_all, "%Y-%m-%d")
+    end_date_all = datetime.strptime(strategy_end_date_all, "%Y-%m-%d")
+
+    # Prompt the user for the desired timeframe for analysis and standardize the input
+    timeframe_str = input("Enter the currency pair (e.g., Daily, 1H): ").strip().upper()
+    # Prompt the user for the currency pair they're interested in and standardize the input
+    Pair = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
+
+    training_start_date = "2023-01-01"
+    training_end_date = current_date
+
+    # Fetch and prepare the FX data for the specified currency pair and timeframe
+    eur_usd_data = fetch_fx_data_mt5(Pair, timeframe_str, start_date_all, end_date_all)
+
+    # Apply technical indicators to the data using the 'calculate_indicators' function
+    #eur_usd_data = calculate_indicators(eur_usd_data) 
+
+    # Filter the EUR/USD data for the in-sample training period
+    dataset = eur_usd_data[(eur_usd_data.index >= training_start_date) & (eur_usd_data.index <= training_end_date)]
+
+    dataset = dataset.fillna(0)
+
+    training_set, testing_set = split_and_save_dataset(dataset, timeframe_str, Pair)
+
+    return training_set, testing_set, Pair, timeframe_str
 
 def main_menu():
     while True:
@@ -1305,8 +1344,9 @@ def main_menu():
         print("2 - Evaluate a DQN model - Validate data")
         print("3 - Train a DQN model with csv file data")
         print("4 - Evaluate a DQN model - Full data")
+        print("5 - Get Data")
 
-        choice = input("Enter your choice (1/2/3/4): ")
+        choice = input("Enter your choice (1/2/3/4/5): ")
 
         if choice == '1':
             training_DQN_model(choice)
@@ -1320,8 +1360,11 @@ def main_menu():
         elif choice == '4':
             evaluate_DQN_model(choice)
             break
+        elif choice == '5':
+            get_data()
+            break
         else:
-            print("Invalid choice. Please enter 1, 2, 3, or 4.")
+            print("Invalid choice. Please enter 1, 2, 3, 4 or 5.")
 
 if __name__ == "__main__":
     main_menu()
