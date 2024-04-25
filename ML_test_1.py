@@ -13,6 +13,7 @@ import pandas_ta as ta
 import torch.optim as optim
 import os
 from dateutil.relativedelta import relativedelta
+from datetime import datetime
 import matplotlib.pyplot as plt
 import glob
 import matplotlib.dates as mdates
@@ -20,6 +21,8 @@ import random
 from collections import deque
 from torch.utils.tensorboard import SummaryWriter
 import time
+import shutil
+import re
 
 # Define the ForexTradingEnv class, inheriting from gym.Env to create a custom trading environment
 class ForexTradingEnv(gym.Env):
@@ -532,10 +535,6 @@ class ForexTradingEnv(gym.Env):
         if self.daily_loss_limit_reached:
             reward += -self.max_daily_loss_limit
 
-        if self.daily_loss_limit_reached:
-            net_profit = self.balance - self.initial_balance
-            reward += net_profit
-
         if self.balance > self.initial_balance:
             net_profit = self.balance - self.initial_balance
             reward += net_profit * 0.01
@@ -814,24 +813,7 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
 
             print(f'epoch {e} total training reward is {total_reward} and total profit is {total_in_sample_profit} and total validation reward is {total_test_reward} and total profit is {total_out_of_sample_profit_number}')
 
-            
-            if total_test_reward > best_validation_score:
-                best_validation_score = total_test_reward
-                
-                # Define the directory to save the model based on some parameters
-                save_dir = os.path.join("saved_models", f"{Pair}_{timeframe_str}")
-
-                # Check if this directory exists, if not, create it
-                if not os.path.exists(save_dir):
-                    os.makedirs(save_dir)
-                
-                # Construct the filename with the best validation score included
-                agent_save_filename_best = os.path.join(save_dir, f"agent_state_best_{Pair}_{timeframe_str}_{best_validation_score:.2f}.pkl")
-                
-                # Save the state of the agent
-                agent.save_state(agent_save_filename_best)
-                print(f"Saved improved model to {agent_save_filename_best}")
-            elif total_in_sample_profit > 1000 or total_out_of_sample_profit_number > 1000:
+            if (total_in_sample_profit > 0 and total_out_of_sample_profit_number > 0):
                 # Define the directory to save the model based on some parameters
                 save_dir = os.path.join("saved_models", f"{Pair}_{timeframe_str}")
 
@@ -955,10 +937,18 @@ def evaluate_model(agent_save_filename, testing_set):
         # Adjust the layout to make room for the table
         plt.subplots_adjust(left=0.2, bottom=0.2, top=0.583, right=0.567)
 
-        # Check if the observations directory exists, create it if not
-        specific_folder_name_validation = "Evaluation"
-        if not os.path.exists(specific_folder_name_validation):
-            os.makedirs(specific_folder_name_validation)
+        # Use the current working directory as the base path
+        base_path = os.getcwd()
+
+        # Generate the folder name with a timestamp and reward
+        specific_folder_name_validation = f"Evaluation_{total_test_reward}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        # Combine the base path with the new folder name to form the full path
+        full_folder_path = os.path.join(base_path, specific_folder_name_validation)
+
+        # Check if the directory exists, create it if not
+        if not os.path.exists(full_folder_path):
+            os.makedirs(full_folder_path)
 
         # Construct the filename using the total reward and the unique identifier
         plot_filename_out_of_sample = os.path.join(specific_folder_name_validation, f"Evaluation_EquityCurve.png")
@@ -1019,6 +1009,7 @@ def evaluate_model(agent_save_filename, testing_set):
             'Q-Values': [list(qv) for qv in all_q_values]  # Convert each tensor of Q-values to list
         })
         print(decision_data)
+        return full_folder_path
 
 def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
 
@@ -1240,7 +1231,14 @@ def read_csv_to_dataframe(file_path):
 
 def training_DQN_model(choice):
     if choice == '1':
-       training_set, testing_set, Pair, timeframe_str = get_data()
+        training_set, testing_set, Pair, timeframe_str = get_data()
+        episodes = 1000
+
+        train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str)
+
+        target_directory = evaluate_DQN_model('6')
+
+        clean_evaluate_folder(target_directory)
     elif choice == '3':
         # Search for CSV files starting with "validation"
         validation_files = glob.glob('validation*.csv')
@@ -1260,9 +1258,143 @@ def training_DQN_model(choice):
         for file in training_files:
             training_set = read_csv_to_dataframe(file)
 
-    episodes = 1000
+        episodes = 1000
 
-    train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str)
+        train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_str)
+
+        evaluate_DQN_model('6')
+
+        clean_evaluate_folder()
+    elif choice == '6':
+        forex_pairs = [
+            'GBPUSD', 'USDCHF', 'USDCAD', 'AUDUSD', 'AUDNZD', 'AUDCAD',
+            'AUDCHF', 'GBPCAD', 'NZDUSD', 'EURGBP', 'EURAUD',
+            'EURCHF', 'EURNZD', 'EURCAD', 'GBPCAD', 'GBPCHF',
+            'CADCHF', 'GBPAUD', 'GBPNZD', 'NZDCAD', 'NZDCHF', 'EURUSD'
+        ]
+
+        timeframe_str = input("Enter the currency pair (e.g., Daily, 1H): ").strip().upper()
+
+        for pair in forex_pairs:
+            print(f"Processing {pair} on {timeframe_str}")
+            try:
+                training_set, testing_set = get_data_multiple(pair, timeframe_str)
+                episodes = 1000
+                train_agent_in_sample(episodes, training_set, testing_set, pair, timeframe_str)
+                target_directory = evaluate_DQN_model('6')
+                clean_evaluate_folder(target_directory)
+            except Exception as e:
+                print(f"Failed to process {pair}: {str(e)}")
+
+def extract_weight_from_folder_name(folder_name):
+    # Use regular expression to extract the numerical value from the folder name
+    match = re.search(r"_(\d+\.\d+)_", folder_name)
+    if match:
+        return float(match.group(1))
+
+def clean_evaluate_folder(target_directory):
+    # Assume the base directory and file pattern for testing
+    testing_files = glob.glob('testing*.csv')
+    
+    if not testing_files:
+        print("No testing files found.")
+        return
+
+    # Assume the first (and only) testing file contains the pair and timeframe in its name
+    test_file_path = testing_files[0]
+    parts = os.path.basename(test_file_path).split('_')
+
+    # Extract the pair and timeframe from the file name
+    Pair = parts[1]
+    timeframe_str = parts[2].split('.')[0]  # Assuming the file extension follows immediately after the timeframe
+
+    # Read the testing data to determine the period covered
+    df = pd.read_csv(test_file_path, parse_dates=['time'], index_col='time')
+    first_date = df.index.min().strftime('%Y-%m-%d')
+    last_date = df.index.max().strftime('%Y-%m-%d')
+
+    # Define the base folder name based on the currency pair, timeframe, and date range
+    base_folder_name = f"evaluate_{Pair}_{timeframe_str}_validate_period_{first_date}_to_{last_date}"
+
+    # Determine the full path of the base folder
+    base_folder_path = os.path.join(os.getcwd(), base_folder_name)
+
+    # Ensure the base directory exists before proceeding
+    if not os.path.exists(base_folder_path):
+        print(f"Directory does not exist: {base_folder_path}")
+        return
+
+    # List all subdirectories within the base folder
+    subdirectories = [os.path.join(base_folder_path, d) for d in os.listdir(base_folder_path) if os.path.isdir(os.path.join(base_folder_path, d))]
+
+    # Define the regex pattern to search for the numerical value in directory names
+    pattern = r"_(\d+\.\d+)_"
+
+    # Loop through each subdirectory
+    for subdir in subdirectories:
+        # Use regular expression to find matches
+        match = re.search(pattern, os.path.basename(subdir))
+        if match:
+            # Convert the extracted value to a float
+            value = float(match.group(1))
+            # Check if the value is less than 100
+            if value < 100:
+                print(f"Deleting {subdir} with value {value}")  # Debug print
+                shutil.rmtree(subdir)  # Uncomment this line to enable actual deletion
+
+    testing_file = glob.glob('testing*.csv')
+
+    training_file = glob.glob('training*.csv')
+
+    validation_file = glob.glob('validation*.csv')
+
+    full_data_file = glob.glob('Full_data*.csv')
+
+    # Corrected code to move the file to the target_directory
+    test_file_path = testing_file[0]  # Use the first (and only) testing file
+    destination_test_file_path = os.path.join(target_directory, os.path.basename(test_file_path))
+    print(destination_test_file_path)
+    # Corrected parameters order for shutil.move
+    shutil.move(test_file_path, destination_test_file_path)
+
+    # Corrected code to move the file to the target_directory
+    train_file_path = training_file[0]  # Use the first (and only) testing file
+    destination_train_file_path = os.path.join(target_directory, os.path.basename(train_file_path))
+    # Corrected parameters order for shutil.move
+    shutil.move(train_file_path, destination_train_file_path)
+
+    # Corrected code to move the file to the target_directory
+    validation_file_path = validation_file[0]  # Use the first (and only) testing file
+    destination_validation_file_path = os.path.join(target_directory, os.path.basename(validation_file_path))
+    # Corrected parameters order for shutil.move
+    shutil.move(validation_file_path, destination_validation_file_path)
+
+    # Corrected code to move the file to the target_directory
+    full_data_file_path = full_data_file[0]  # Use the first (and only) testing file
+    destination_full_data_file_path = os.path.join(target_directory, os.path.basename(full_data_file_path))
+    # Corrected parameters order for shutil.move
+    shutil.move(full_data_file_path, destination_full_data_file_path)
+
+def ensemble_predict(agents, folder_names, state):
+    actions = []
+    weights = []
+    
+    # Collect all actions predicted by each agent and corresponding weights from folder names
+    for agent, folder_name in zip(agents, folder_names):
+        action = agent.predict_action(state)
+        weight = extract_weight_from_folder_name(folder_name)
+        
+        actions.append(action)
+        weights.append(weight)
+    
+    # Create a weighted action count array
+    action_counts = np.zeros(5)  # Assuming there are 5 possible actions (0 to 4)
+    for action, weight in zip(actions, weights):
+        action_counts[action] += weight
+    
+    # Determine the action with the highest weighted frequency
+    consensus_action = np.argmax(action_counts)
+    return consensus_action
 
 def evaluate_DQN_model(choice):
     if choice == '2':
@@ -1277,8 +1409,8 @@ def evaluate_DQN_model(choice):
             timeframe_str = parts[2]
 
             evaluation_dataset = read_csv_to_dataframe(file)
+        evaluate_model(f"agent_state_{Pair}_{timeframe_str}.pkl", evaluation_dataset)
     elif choice == '4':
-
         # Search for CSV files starting with "testing"
         testing_files = glob.glob('testing*.csv')
 
@@ -1291,9 +1423,70 @@ def evaluate_DQN_model(choice):
 
         file_data = 'Full_data.csv'
         evaluation_dataset = read_csv_to_dataframe(file_data)
-        
+        evaluate_model(f"agent_state_{Pair}_{timeframe_str}.pkl", evaluation_dataset)
+    elif choice == '6':
+        # Search for CSV files starting with "testing"
+        testing_files = glob.glob('testing*.csv')
+
+        for file in testing_files:
+            parts = file.split('_')
+
+            # Extract the pair and timeframe
+            Pair = parts[1]
+            timeframe_str = parts[2]
+
+            test_file_path = testing_files[0]  # Use the first (and only) testing file
+
+            df = pd.read_csv(test_file_path, parse_dates=['time'], index_col='time')
     
-    evaluate_model(f"agent_state_{Pair}_{timeframe_str}.pkl", evaluation_dataset)
+            # Get the first and last index values, which are the first and last dates
+            first_date = df.index.min()
+            last_date = df.index.max()
+
+        evaluation_dataset = read_csv_to_dataframe(file)
+        model_dir = f'saved_models/{Pair}_{timeframe_str}'
+
+        # Current file name
+        current_file_name = f'agent_state_{Pair}_{timeframe_str}.pkl'
+        
+        # Current directory path of the file
+        current_file_path = os.path.join(os.getcwd(), current_file_name)
+
+        # Construct the target file path
+        target_file_path = os.path.join(model_dir, current_file_name)
+        
+        # Move the file
+        shutil.move(current_file_path, target_file_path)
+
+        model_paths = glob.glob(os.path.join(model_dir, '*.pkl'))
+
+        for model_path in model_paths:
+            full_folder_path =  evaluate_model(f"{model_path}", evaluation_dataset)
+
+            # Copy the testing file to the evaluated model's results folder
+            destination_test_file_path = os.path.join(full_folder_path, os.path.basename(test_file_path))
+            shutil.copy(test_file_path, destination_test_file_path)
+
+            # Extract the filename from the model path
+            model_filename = os.path.basename(model_path)
+            
+            # Create the new model path using the folder path and model filename
+            new_model_path = os.path.join(full_folder_path, model_filename)
+            
+            # Move the model file to the evaluation directory
+            shutil.move(model_path, new_model_path)
+
+            # Determine the target directory for organizing evaluations
+            target_directory = os.path.join(os.getcwd(), f"evaluate_{Pair}_{timeframe_str}_validate_period_{first_date.strftime('%Y-%m-%d')}_to_{last_date.strftime('%Y-%m-%d')}")
+            os.makedirs(target_directory, exist_ok=True)  # Ensure the directory exists
+
+            # Construct the new path for the evaluated folder
+            new_folder_path = os.path.join(target_directory, os.path.basename(full_folder_path))
+
+            # Move the entire folder
+            shutil.move(full_folder_path, new_folder_path)
+
+        return target_directory
 
 def get_data():
     # Retrieve and store the current date
@@ -1337,6 +1530,43 @@ def get_data():
 
     return training_set, testing_set, Pair, timeframe_str
 
+def get_data_multiple(Pair, timeframe_str):
+    # Retrieve and store the current date
+    current_date = str(datetime.now().date())
+    current_date_datetime = datetime.now().date()
+
+    # Calculate the date for one month before the current date
+    one_month_before = current_date_datetime - relativedelta(months=1)
+    # Convert to string if needed
+    one_month_before_str = str(one_month_before)
+
+    # Hardcoded start date for strategy evaluation
+    strategy_start_date_all = "1971-01-04"
+    # Use the current date as the end date for strategy evaluation
+    strategy_end_date_all = current_date
+
+    # Convert string representation of dates to datetime objects for further processing
+    start_date_all = datetime.strptime(strategy_start_date_all, "%Y-%m-%d")
+    end_date_all = datetime.strptime(strategy_end_date_all, "%Y-%m-%d")
+
+    training_start_date = "2023-01-01"
+    training_end_date = current_date
+
+    # Fetch and prepare the FX data for the specified currency pair and timeframe
+    eur_usd_data = fetch_fx_data_mt5(Pair, timeframe_str, start_date_all, end_date_all)
+
+    # Apply technical indicators to the data using the 'calculate_indicators' function
+    #eur_usd_data = calculate_indicators(eur_usd_data) 
+
+    # Filter the EUR/USD data for the in-sample training period
+    dataset = eur_usd_data[(eur_usd_data.index >= training_start_date) & (eur_usd_data.index <= training_end_date)]
+
+    dataset = dataset.fillna(0)
+
+    training_set, testing_set = split_and_save_dataset(dataset, timeframe_str, Pair)
+
+    return training_set, testing_set
+
 def main_menu():
     while True:
         print("\nMain Menu:")
@@ -1345,6 +1575,7 @@ def main_menu():
         print("3 - Train a DQN model with csv file data")
         print("4 - Evaluate a DQN model - Full data")
         print("5 - Get Data")
+        print("6 - Train Multiple Different Forex Pairs")
 
         choice = input("Enter your choice (1/2/3/4/5): ")
 
@@ -1362,6 +1593,9 @@ def main_menu():
             break
         elif choice == '5':
             get_data()
+            break
+        elif choice == '6':
+            training_DQN_model(choice)
             break
         else:
             print("Invalid choice. Please enter 1, 2, 3, 4 or 5.")
