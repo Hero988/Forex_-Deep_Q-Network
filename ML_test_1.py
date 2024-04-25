@@ -1327,8 +1327,8 @@ def clean_evaluate_folder(target_directory):
     # List all subdirectories within the base folder
     subdirectories = [os.path.join(base_folder_path, d) for d in os.listdir(base_folder_path) if os.path.isdir(os.path.join(base_folder_path, d))]
 
-    # Define the regex pattern to search for the numerical value in directory names
-    pattern = r"_(\d+\.\d+)_"
+    # Define the regex pattern to extract the numerical value (including negative numbers) from the directory names
+    pattern = r"_(-?\d+\.\d+)_"
 
     # Loop through each subdirectory
     for subdir in subdirectories:
@@ -1337,9 +1337,8 @@ def clean_evaluate_folder(target_directory):
         if match:
             # Convert the extracted value to a float
             value = float(match.group(1))
-            # Check if the value is less than 100
+            # Check if the value is positive and less than 100
             if value < 100:
-                print(f"Deleting {subdir} with value {value}")  # Debug print
                 shutil.rmtree(subdir)  # Uncomment this line to enable actual deletion
 
     testing_file = glob.glob('testing*.csv')
