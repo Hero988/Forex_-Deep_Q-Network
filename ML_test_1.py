@@ -30,7 +30,7 @@ class ForexTradingEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
     # Constructor with parameters for initializing the environment
-    def __init__(self, data, num_features=0, window_size=24, initial_balance=10000, leverage=100, transaction_cost=0.0002, stop_loss_percent=0.5, take_profit_percent=1, lot_size=1000):
+    def __init__(self, data, num_features=0, window_size=24, initial_balance=10000, leverage=100, transaction_cost=0.0002, stop_loss_percent=0.5, take_profit_percent=1, lot_size=1000, history_size=10):
         # Call the constructor of the superclass
         super(ForexTradingEnv, self).__init__()
 
@@ -57,7 +57,6 @@ class ForexTradingEnv(gym.Env):
         self.sl_price = 0  # Stop loss price
         self.tp_price = 0  # Take profit price
         self.current_step = 0  # Current step in the environment
-        self.trade_history = []  # History of trades made
         self.pnl_history = [0]  # History of profit and loss, starting with 0
         self.trade_profit = 0  # Profit from the current trade, initialized to 0
         self.position_closed_recently = False  # Flag to indicate if a position was closed recently
@@ -71,12 +70,19 @@ class ForexTradingEnv(gym.Env):
         self.daily_pnl = 0  # Initialize daily profit and loss
         self.last_processed_date = None  # Keep track of the last processed date
         self.daily_loss_limit_reached = False
+        self.trade_history = []  # History of trades made
+        self.history_size = history_size
+        # Assume 7 features based on selection: Profit, Position Type, Lot Size, Price at Close, Worst Case PnL, Best Case PnL, Closed Balance
+        self.history = np.zeros((self.history_size, 10))
 
         # Define the action space of the environment
         self.action_space = spaces.Discrete(4)  # 0 - Buy, 1 - Sell, 2 - Close, 3 - Hold
 
+        # Update observation space size: data window + trade history features
+        total_features = self.window_size * num_features + self.history_size * 10
+
         # Define the observation space of the environment
-        self.observation_space = spaces.Box(low=0, high=np.inf, shape=(self.window_size * self.num_features,), dtype=np.float32)  # Observation space defined as a box with values ranging from 0 to infinity, shaped according to the window size and number of features
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_features,), dtype=np.float32)  # Observation space defined as a box with values ranging from 0 to infinity, shaped according to the window size and number of features
 
     # Method to save the current state of the environment to a file
     def save_state(self, filename):
@@ -340,7 +346,39 @@ class ForexTradingEnv(gym.Env):
         # Return the observation to the caller, typically for starting a new episode
         return observation
 
-    # Define a method to get the next observation from the data
+    def update_history_from_trade_history(self):
+        # Define the action mapping
+        action_mapping = {'Open Long': 0, 'Open Short': 1, 'Closed Position': 2, 'Hold': 3, 'No open position to close': 3}
+        
+        # Initialize an empty list to hold structured trade data
+        structured_trade_data = []
+        
+        # Extract features from each trade dictionary, using the last self.history_size trades
+        for trade in self.trade_history[-self.history_size:]:
+            action_number = action_mapping.get(trade.get('Action', 'Hold'), 3)  # Default to 'Hold' if action is unknown
+            position_type = 1 if trade.get('Position', 'neutral') == 'long' else -1 if trade.get('Position', 'neutral') == 'short' else 0
+            is_open_number = 1 if trade.get('is_open', False) else 0
+
+            # Using 'or 0' to ensure None is treated as 0
+            sl_price = trade.get('SL Price') or 0
+            tp_price = trade.get('TP Price') or 0
+            
+            structured_trade_data.append([
+                float(trade.get('Profit', 0)),
+                float(trade.get('Balance', self.initial_balance)),
+                float(position_type),
+                float(is_open_number),
+                float(sl_price),  # Ensure None values are converted to 0 before applying float
+                float(tp_price),  # Ensure None values are converted to 0 before applying float
+                float(trade.get('lot_size', 0)),
+                float(trade.get('Price', 0)),
+                float(trade.get('Closed Balance', self.initial_balance)),
+                float(action_number)  # Adding the mapped action number   
+            ])
+
+        # Convert the list to a NumPy array
+        self.history = np.array(structured_trade_data, dtype=np.float32)
+        
     def _next_observation(self):
         # Initialize the count of missing rows to 0
         missing_rows = 0
@@ -361,13 +399,24 @@ class ForexTradingEnv(gym.Env):
             obs_df = pd.concat([obs_df, padding], ignore_index=True)
 
         # Flatten the DataFrame into a 1D array for use in the environment
-        flattened_obs = obs_df.values.flatten()
+        flattened_data_obs = obs_df.values.flatten()
+
+        # Update and format trade history part
+        self.update_history_from_trade_history()
+        flattened_history = self.history.flatten()
+
+        # Ensure the flattened history matches the expected number of features
+        if len(flattened_history) != self.history_size * 10:
+            additional_zeros = np.zeros(self.history_size * 10 - len(flattened_history))
+            flattened_history = np.concatenate([flattened_history, additional_zeros])
+        
+        combined_observation = np.concatenate([flattened_data_obs, flattened_history])
 
         # Increment the current step
         self.current_step += 1
 
-        # Return the flattened observation array
-        return flattened_obs
+        # Return the combined observation array
+        return combined_observation
 
     # Define a method to take a step in the environment based on an action
     def step(self, action, trade_history):
@@ -436,9 +485,6 @@ class ForexTradingEnv(gym.Env):
         step_reward = self.calculate_step_reward(action, trade_history, self.current_step)
 
         reward = step_reward + final_reward
-
-        # Log the trade action taken
-        self.log_trade(self.current_step, action, current_price, self.balance, current_date, self.lot_size)
 
         # Get the next observation after taking the step
         next_observation = self._next_observation()
@@ -515,18 +561,6 @@ class ForexTradingEnv(gym.Env):
                 "Percent Profitable": f"{percent_profitable:.2f}%",  # The percentage of trades that were profitable
                 "Magnitude of loss": magnitude_of_highest_daily_loss  # The magnitude of the highest daily loss
             }
-
-    # Define a method to log the details of a trade
-    def log_trade(self, step, action, price, balance, date, lot_size):
-        # Check if the action is represented as an integer (e.g., 0 for Buy, 1 for Sell)
-        if isinstance(action, int):
-            # Convert the integer action to a human-readable string
-            action_str = {0: 'Buy', 1: 'Sell', 2: 'Close'}.get(action, 'Unknown')
-        else:
-            # If the action is already a string, use it directly
-            action_str = action
-        # Optional print statement to log the trade details (commented out)
-        #print(f"Step: {step}, Action: {action_str}, Price: {price}, Balance: {balance}, Date: {date}, Current Lot Size: {lot_size}")
 
     def calculate_step_reward(self, action, trade_history, step_number):
         # Initialize the reward variable
@@ -754,7 +788,7 @@ def train_agent_in_sample(episodes, training_set, testing_set, Pair, timeframe_s
             # Reset the environment to get the initial state and store it
             state = env_in_sample.reset()
             all_observations.append(state)
-            
+
             # Initialize total reward for the episode
             total_reward = 0
             # Flag to indicate if the episode is done
@@ -1286,12 +1320,6 @@ def training_DQN_model(choice):
             except Exception as e:
                 print(f"Failed to process {pair}: {str(e)}")
 
-def extract_weight_from_folder_name(folder_name):
-    # Use regular expression to extract the numerical value from the folder name
-    match = re.search(r"_(\d+\.\d+)_", folder_name)
-    if match:
-        return float(match.group(1))
-
 def clean_evaluate_folder(target_directory):
     # Assume the base directory and file pattern for testing
     testing_files = glob.glob('testing*.csv')
@@ -1374,13 +1402,19 @@ def clean_evaluate_folder(target_directory):
     # Corrected parameters order for shutil.move
     shutil.move(full_data_file_path, destination_full_data_file_path)
 
+def extract_weight_from_folder_name(folder_name):
+    # Use regular expression to extract the numerical value from the folder name
+    match = re.search(r"_(\d+\.\d+)_", folder_name)
+    if match:
+        return float(match.group(1))
+
 def ensemble_predict(agents, folder_names, state):
     actions = []
     weights = []
     
     # Collect all actions predicted by each agent and corresponding weights from folder names
     for agent, folder_name in zip(agents, folder_names):
-        action = agent.predict_action(state)
+        action = agent.act(state)
         weight = extract_weight_from_folder_name(folder_name)
         
         actions.append(action)
@@ -1517,8 +1551,7 @@ def get_data():
     # Fetch and prepare the FX data for the specified currency pair and timeframe
     eur_usd_data = fetch_fx_data_mt5(Pair, timeframe_str, start_date_all, end_date_all)
 
-    # Apply technical indicators to the data using the 'calculate_indicators' function
-    #eur_usd_data = calculate_indicators(eur_usd_data) 
+    eur_usd_data = calculate_indicators(eur_usd_data) 
 
     # Filter the EUR/USD data for the in-sample training period
     dataset = eur_usd_data[(eur_usd_data.index >= training_start_date) & (eur_usd_data.index <= training_end_date)]
@@ -1554,8 +1587,7 @@ def get_data_multiple(Pair, timeframe_str):
     # Fetch and prepare the FX data for the specified currency pair and timeframe
     eur_usd_data = fetch_fx_data_mt5(Pair, timeframe_str, start_date_all, end_date_all)
 
-    # Apply technical indicators to the data using the 'calculate_indicators' function
-    #eur_usd_data = calculate_indicators(eur_usd_data) 
+    eur_usd_data = calculate_indicators(eur_usd_data) 
 
     # Filter the EUR/USD data for the in-sample training period
     dataset = eur_usd_data[(eur_usd_data.index >= training_start_date) & (eur_usd_data.index <= training_end_date)]
