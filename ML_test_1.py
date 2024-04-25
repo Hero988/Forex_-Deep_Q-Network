@@ -927,9 +927,6 @@ def evaluate_model(agent_save_filename, testing_set):
         plt.figure(figsize=(15, 10))  # Create a figure with specified size
         ax = plt.gca()  # Get the current axes for plotting
 
-        # Get the current date and time as a string for potential use in titles or filenames
-        current_datetime_str = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
         # Extract and plot the equity curve based on closed balances and corresponding dates
         balances = []
         dates = []
@@ -1408,26 +1405,271 @@ def extract_weight_from_folder_name(folder_name):
     if match:
         return float(match.group(1))
 
-def ensemble_predict(agents, folder_names, state):
+def extract_info_from_folder_name(folder_name):
+    # Split the folder name by underscores
+    parts = folder_name.split('_')
+    
+    # Extract currency pair and timeframe assuming the format includes them
+    if len(parts) >= 4:
+        pair = parts[2]
+        timeframe_str = parts[3]
+        return pair, timeframe_str
+    else:
+        raise ValueError("Folder name format is incorrect or missing essential information.")
+
+def extract_info_from_folder_name(folder_name):
+    # Extracts information assuming folder name format "evaluate_{Pair}_{timeframe}_otherinfo"
+    parts = folder_name.split('_')
+    pair = parts[1]
+    timeframe = parts[2]
+    return pair, timeframe
+
+def get_evaluation_folders(Pair, timeframe_str):
+    # Get the current working directory
+    base_directory = os.getcwd()
+
+    # Construct the prefix to match directories for evaluations
+    directory_prefix = "evaluate_"
+
+    # List all entries in the base directory
+    full_paths = [os.path.join(base_directory, d) for d in os.listdir(base_directory) if os.path.isdir(os.path.join(base_directory, d)) and d.startswith(directory_prefix)]
+
+    # Dictionary to hold all pairs and their evaluations
+    evaluations_by_pair_and_timeframe = {}
+    agent_state_paths = {}
+
+    # Process each folder that matches the evaluation pattern
+    for folder in full_paths:
+        key = (Pair, timeframe_str)
+
+        # Directory for individual evaluations within the main folder
+        evaluation_prefix = "Evaluation_"
+        evaluation_paths = [os.path.join(folder, d) for d in os.listdir(folder) if os.path.isdir(os.path.join(folder, d)) and d.startswith(evaluation_prefix)]
+
+        # Extract last sections of the evaluation paths
+        evaluations = []
+        for eval_path in evaluation_paths:
+            # Append the last section
+            evaluation_name = os.path.basename(eval_path)
+            evaluations.append(evaluation_name)
+            
+            # Search for agent_state_best_ in this folder
+            agent_files = [file for file in os.listdir(eval_path) if file.startswith('agent_state_best_')]
+            if agent_files:
+                agent_state_paths[evaluation_name] = os.path.join(eval_path, agent_files[0])
+
+        # Store the evaluations under the corresponding pair and timeframe
+        evaluations_by_pair_and_timeframe[key] = evaluations
+
+    return evaluations_by_pair_and_timeframe, agent_state_paths
+
+def ensemble_predict(state, input_dim, action_size, Pair, timeframe_str):
+    evaluations_by_pair_and_timeframe, agent_state_paths = get_evaluation_folders(Pair, timeframe_str)
+    
     actions = []
     weights = []
-    
+
+    # Create a new PPOAgent instance for evaluation purposes
+    agent = DQNAgent(input_dim, action_size)
+
     # Collect all actions predicted by each agent and corresponding weights from folder names
-    for agent, folder_name in zip(agents, folder_names):
-        action = agent.act(state)
-        weight = extract_weight_from_folder_name(folder_name)
-        
-        actions.append(action)
-        weights.append(weight)
-    
+    for evaluation in evaluations_by_pair_and_timeframe.values():
+        for folder_name in evaluation:
+            agent_path = agent_state_paths.get(folder_name)
+            if agent_path:
+                agent.load_state(agent_path, reset_epsilon=True, new_epsilon=0)
+                result = agent.act(state)
+                
+                # Check if the result is a tuple and extract the action
+                if isinstance(result, tuple):
+                    action = result[0]  # Assuming the action is the first element of the tuple
+                    if isinstance(action, torch.Tensor):
+                        action = action.detach().item()  # Converts tensor to a Python int
+                else:
+                    action = result  # Direct use if not a tuple
+                
+                weight = extract_weight_from_folder_name(folder_name)
+
+                actions.append(action)
+                weights.append(weight)
+
     # Create a weighted action count array
     action_counts = np.zeros(5)  # Assuming there are 5 possible actions (0 to 4)
     for action, weight in zip(actions, weights):
         action_counts[action] += weight
-    
+
     # Determine the action with the highest weighted frequency
     consensus_action = np.argmax(action_counts)
     return consensus_action
+
+def evaluate_ensemble():
+    training_set, testing_set, Pair, timeframe_str = get_data()
+    num_columns = len(testing_set.columns)
+    # Initialize the trading environment with out-of-sample data
+    env_out_of_sample = ForexTradingEnv(testing_set, num_columns)
+
+    observation_space_shape = env_out_of_sample.observation_space.shape[0]  # Or any other method to find the total features per timestep.
+
+    input_dim = observation_space_shape
+
+    # Determine the action space size from the environment
+    action_size = env_out_of_sample.action_space.n
+
+    # Initialize the total reward for out-of-sample testing
+    total_test_reward = 0
+
+    # Initialize a list to store all observations during out-of-sample testing
+    all_observations = []
+    all_actions = []
+    all_rewards = []
+
+    # Reset the environment to get the initial state for out-of-sample testing
+    state = env_out_of_sample.reset()
+    # Append the initial state to the observations list
+    all_observations.append(state)
+
+    done = False
+
+    # Continue the loop until the episode ends (the 'done' flag is True)
+    while not done:
+        # Select an action based on the current state using the agent's policy
+        action = ensemble_predict(state, input_dim, action_size, Pair, timeframe_str)
+        # Temporary storage for out-of-sample trade history
+        out_of_sample_trade_history = env_out_of_sample.trade_history
+
+        # Execute the selected action in the environment and observe the next state and reward
+        next_state, reward, done, _ = env_out_of_sample.step(action, out_of_sample_trade_history)
+        # Accumulate the total reward for this episode
+        total_test_reward += reward
+        # Record the next state for later analysis
+        all_observations.append(next_state)
+
+        all_observations.append(next_state)
+        all_actions.append(action)
+        all_rewards.append(reward)
+
+        # Update the current state to the next state to continue the loop
+        state = next_state
+
+    # Evaluate performance
+    performance_metrics_out_of_sample = env_out_of_sample.evaluate_performance()
+            
+    # Assuming equity curve plotting is desired at the end of each episode
+    plt.figure(figsize=(15, 10))  # Create a figure with specified size
+    ax = plt.gca()  # Get the current axes for plotting
+
+    # Extract and plot the equity curve based on closed balances and corresponding dates
+    balances = []
+    dates = []
+    for trade in env_out_of_sample.trade_history:
+        if 'Closed Balance' in trade:
+            balances.append(trade['Closed Balance'])
+            dates.append(datetime.strptime(trade['Date'], '%Y-%m-%d'))
+
+    ax.plot(dates, balances, '-o', label='Equity Curve')  # Plot the equity curve with markers
+
+    # Customize the plot with titles, labels, and formatting
+    ax.set_title(f'Equity Curve for {total_test_reward}')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Balance')
+    ax.legend()
+    ax.grid(True)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))  # Format the x-axis dates
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    plt.gcf().autofmt_xdate()  # Auto-format date labels for readability
+
+    # Prepare data for a table summarizing key performance metrics
+    metrics_data = [
+        ['Final Balance', f"{performance_metrics_out_of_sample['Final Balance']:.2f}"],
+        ['Final Profit', f"{performance_metrics_out_of_sample['Final Profit']:.2f}"],
+        ['Maximum Drawdown', performance_metrics_out_of_sample['Maximum Drawdown']],
+        ['Highest Daily Loss', performance_metrics_out_of_sample['Highest Daily Loss']],
+        ['Profit Factor', performance_metrics_out_of_sample['Profit Factor']],
+        ['Number of Closed Trades', str(performance_metrics_out_of_sample['Number of Closed Trades'])],
+        ['Percent Profitable', performance_metrics_out_of_sample['Percent Profitable']],
+        ['Total Reward', total_test_reward]
+    ]
+
+    # Add the table to the plot, specifying its location and appearance
+    table = plt.table(cellText=metrics_data, colLabels=['Metric', 'Value'], loc='bottom', cellLoc='center', bbox=[0.0, -0.5, 1.0, 0.3])
+    table.auto_set_font_size(False)  # Disable automatic font size setting
+    table.set_fontsize(9)  # Set font size for the table
+    table.scale(1, 1.5)  # Scale the table to fit better in the plot
+
+    # Adjust the layout to make room for the table
+    plt.subplots_adjust(left=0.2, bottom=0.2, top=0.583, right=0.567)
+
+    # Use the current working directory as the base path
+    base_path = os.getcwd()
+
+    # Generate the folder name with a timestamp and reward
+    specific_folder_name_validation = f"Evaluation_{total_test_reward}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # Combine the base path with the new folder name to form the full path
+    full_folder_path = os.path.join(base_path, specific_folder_name_validation)
+
+    # Check if the directory exists, create it if not
+    if not os.path.exists(full_folder_path):
+        os.makedirs(full_folder_path)
+
+    # Construct the filename using the total reward and the unique identifier
+    plot_filename_out_of_sample = os.path.join(specific_folder_name_validation, f"Evaluation_EquityCurve.png")
+
+    # Save the plot to the specified file
+    plt.savefig(plot_filename_out_of_sample)
+    plt.close()  # Close the plot to free up system resources
+
+    # Clear the current figure to avoid any overlap with future plots
+    plt.clf()
+
+    # Construct the filename for saving performance metrics, including the unique identifier and the current datetime
+    metrics_filename = os.path.join(specific_folder_name_validation, f"Evaluation_PerformanceMetrics.txt")
+
+    # Open the file for writing and record each performance metric
+    with open(metrics_filename, 'w') as file:
+        for metric in metrics_data:
+            key, value = metric
+            file.write(f"{key}: {value}\n")  
+
+    # Construct the filename for saving the out-of-sample trade history, including the currency pair, timeframe, evaluation dates, and episode number
+    out_of_sample_filename = os.path.join(specific_folder_name_validation, f"Evaluation_trade_history_episode.csv")
+
+    # Convert the list of dictionaries (trade history) into a pandas DataFrame
+    df_out_of_sample = pd.DataFrame(env_out_of_sample.trade_history)
+
+    # Save the DataFrame to a CSV file at the specified path
+    df_out_of_sample.to_csv(out_of_sample_filename, index=False)
+
+    # Plotting the actions and rewards
+    plt.figure(figsize=(14, 7))
+    plt.subplot(2, 1, 1)
+    plt.plot(all_rewards, label='Rewards')
+    plt.title('Rewards per Step')
+    plt.xlabel('Step')
+    plt.ylabel('Reward')
+    plt.legend()
+
+    plt.subplot(2, 1, 2)
+    plt.plot(all_actions, label='Actions', marker='o')
+    plt.title('Actions per Step')
+    plt.xlabel('Step')
+    plt.ylabel('Action')
+    plt.legend()
+
+    plt.tight_layout()
+    # Construct the filename using the total reward and the unique identifier
+    plot_filename = os.path.join(specific_folder_name_validation, f"Evaluation_Rewards_and_Actions_per_Step.png")
+
+    # Save the plot to the specified file
+    plt.savefig(plot_filename)
+    plt.close()  # Close the plot to free up system resources
+
+    # Optionally print detailed decision data
+    decision_data = pd.DataFrame({
+        'Actions': all_actions,
+        'Rewards': all_rewards
+    })
+    print(decision_data)
 
 def evaluate_DQN_model(choice):
     if choice == '2':
@@ -1607,6 +1849,7 @@ def main_menu():
         print("4 - Evaluate a DQN model - Full data")
         print("5 - Get Data")
         print("6 - Train Multiple Different Forex Pairs")
+        print("7 - Ensemble Evaluate")
 
         choice = input("Enter your choice (1/2/3/4/5): ")
 
@@ -1627,6 +1870,9 @@ def main_menu():
             break
         elif choice == '6':
             training_DQN_model(choice)
+            break
+        elif choice == '7':
+            evaluate_ensemble()
             break
         else:
             print("Invalid choice. Please enter 1, 2, 3, 4 or 5.")
