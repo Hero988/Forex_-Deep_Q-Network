@@ -1833,8 +1833,9 @@ def calculate_time_to_next_candle(latest_time_index, timeframe):
         '1D': 24
     }
     
-    hours = timeframe_mapping.get(timeframe, 4)  # Default to 4 hours if not specified
-    next_candle_time = latest_time_index + timedelta(hours=hours, minutes=3)
+    hours = timeframe_mapping.get(timeframe, 1)  # Default to 4 hours if not specified
+    hours_correct  = hours + 1
+    next_candle_time = latest_time_index + timedelta(hours=hours_correct, minutes=2)
     now = datetime.now() 
 
     # Format to just include the hour and minute
@@ -1860,11 +1861,102 @@ def countdown(t):
         t -= 1
     print("Next candle is now live!           ")
 
+def execute_trade(symbol, trade_type, stop_loss_percent, take_profit_percent):
+    # Initialize MT5 connection
+    if not mt5.initialize():
+        print("initialize() failed, error code =", mt5.last_error())
+        return
+
+    # Check if we are already in a trade for the specified symbol
+    positions = mt5.positions_get(symbol=symbol)
+    if positions is None:
+        print("Failed to get positions, error code =", mt5.last_error())
+
+    if trade_type == "close":
+        print("Attempting to close position for", symbol)
+        for position in positions:
+            result = mt5.Close(symbol, ticket=position.ticket)
+        # Ensure to shut down MT5 and exit the function after handling close
+        mt5.shutdown()
+        return
+    else:
+        print("Already in a trade on", symbol)
+        in_trade = True
+
+    # Continue only if trade_type is not 'Close'
+    # Get the current market price
+    price_info = mt5.symbol_info_tick(symbol)
+    if price_info is None:
+        print("Failed to get price for symbol", symbol)
+        mt5.shutdown()
+        return
+    
+    ask = price_info.ask  # price for buy orders
+    bid = price_info.bid  # price for sell orders
+    current_price = ask if trade_type == 'buy' else bid
+
+    # Define the order type based on trade type
+    order_type = mt5.ORDER_TYPE_BUY if trade_type == 'buy' else mt5.ORDER_TYPE_SELL
+
+    # Calculate stop loss and take profit prices
+    sl_price = ask * (1 - stop_loss_percent / 100) if trade_type == 'buy' else bid * (1 + stop_loss_percent / 100)
+    tp_price = ask * (1 + take_profit_percent / 100) if trade_type == 'buy' else bid * (1 - take_profit_percent / 100)
+
+    # Create trade request
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": 0.01,
+        "type": order_type,
+        "price": current_price,
+        "sl": sl_price,
+        "tp": tp_price,
+        "deviation": 10,
+        "magic": 234000,
+        "comment": "python script open",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+
+    # Send the trade request
+    result = mt5.order_send(request)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        print("Failed to send order:", result)
+    else:
+        print("Order executed,", result)
+
+    # Disconnect from MT5
+    mt5.shutdown()
+
+def initialize_mt5():
+    # Define your MetaTrader 5 account number
+    account_number = 530064788
+    # Define your MetaTrader 5 password
+    password = 'fe5@6YV*'
+    # Define the server name associated with your MT5 account
+    server_name ='FTMO-Server3'
+
+    # Initialize MT5 connection; if it fails, print error message and exit
+    if not mt5.initialize():
+        print("initialize() failed, error code =", mt5.last_error())
+        quit()
+    
+    # Attempt to log in with the given account number, password, and server
+    authorized = mt5.login(account_number, password=password, server=server_name)
+    # If login fails, print error message, shut down MT5 connection, and exit
+    if not authorized:
+        print("login failed, error code =", mt5.last_error())
+        mt5.shutdown()
+        quit()
+    # On successful login, print a confirmation message
+    else:
+        print("Connected to MetaTrader 5")
+
 def live_data_loop(symbol, timeframe, dataset, pkl_file_name):
     action_mappings = {
-        0: "Buy",
-        1: "Sell",
-        2: "Close",
+        0: "buy",
+        1: "sell",
+        2: "close",
         3: "Hold"
     }
 
@@ -1881,8 +1973,6 @@ def live_data_loop(symbol, timeframe, dataset, pkl_file_name):
     # Retrieve the latest row
     latest_row = dataset.tail(1)
 
-    initialize_mt5()
-
     env = ForexTradingEnv(latest_row, num_columns)  # Initialize your environment here
 
     input_dim = env.observation_space.shape[0]  # Or any other method to find the total features per timestep.
@@ -1893,11 +1983,12 @@ def live_data_loop(symbol, timeframe, dataset, pkl_file_name):
 
     state = env.extract_state()
 
-    print(env.current_balance)
-
     while True:
+        initialize_mt5()
         data = fetch_live_data(symbol, timeframe)
         if data is not None:
+
+            enable_live_trading = False
 
             data = data[:-1]
             
@@ -1926,22 +2017,36 @@ def live_data_loop(symbol, timeframe, dataset, pkl_file_name):
 
             print(f'Current q_values: {q_values}')
 
-            next_action = action_mappings[action]  # Map the action code to a trading action
+            action_maped = action_mappings[action]  # Map the action code to a trading action
 
             # Get the latest time index
             latest_time_index = latest_updated_row.index[-1].strftime('%Y-%m-%d %H:%M:%S')
 
             # Write the latest time index and action to the CSV file
             with open(csv_file_path, 'a') as file:
-                file.write(f"{latest_time_index},{next_action}\n")
+                file.write(f"{latest_time_index},{action_maped}\n")
 
-            print(f"Next action to perform: {next_action} at {latest_time_index}")
+            print(f"Next action to perform: {action_maped} at {latest_time_index}")
+
+            if (action_maped == 'close') and (env.is_open_position == True):
+                if enable_live_trading == True:
+                    execute_trade(symbol, f'{action_maped}', 0.5, 1)
+                else:
+                    print('ENABLE LIVE TRADING')
+            else:
+                print('We are not in a trade so cannot close')
+
+            if (action_maped == 'buy' or action_maped == 'sell') and (env.is_open_position == False):
+                if enable_live_trading == True:
+                    execute_trade(symbol, f'{action_maped}', 0.5, 1)
+                else:
+                    print('ENABLE LIVE TRADING')
 
             state_current, done, = env.step_live(action)
 
-            print(f"Trade executed: {next_action}, Open Position: {env.is_open_position}, Current Balance: {env.current_balance}")
-
             env.save_state(f'{symbol}_{timeframe}_enviroment')
+
+            print(f"Trade executed: {action_maped}, Open Position: {env.is_open_position}, Current Balance: {env.current_balance}")
 
             # Calculate time to sleep until the next candle plus 5 minutes
             sleep_time, next_candle_time_str, time_string = calculate_time_to_next_candle(latest_time_index, timeframe)
