@@ -670,7 +670,7 @@ class ForexTradingEnv(gym.Env):
             reward += net_loss
 
         return reward
-             
+              
 class DQN(nn.Module):
     def __init__(self, input_dim, action_dim):
         super(DQN, self).__init__()
@@ -1973,31 +1973,36 @@ def get_best_agent():
         pair = key[0]
         timeframe = key[1]
         folder_path = value['max_folder_path']
-        folder_name = os.path.basename(value['max_folder_path'])
-        pkl_files = [f for f in os.listdir(folder_path) if f.endswith('.pkl')]
-        
-        if pkl_files:  # Check if there are any .pkl files
-            pkl_file_path = os.path.join(folder_path, pkl_files[0])  # Use the first .pkl file found
-            pkl_file_name = os.path.basename(pkl_file_path)  # Extract the filename from the full path
 
-            # Extract weights which are used as profit metrics
-            profit_evaluate = extract_weight_from_folder_name(folder_name)
-            profit_training, profit_validation = extract_weights_from_filename(pkl_file_name)
+        # Ensure folder_path is not None
+        if folder_path:
+            folder_name = os.path.basename(folder_path)
+            pkl_files = [f for f in os.listdir(folder_path) if f.endswith('.pkl')]
+            
+            if pkl_files:  # Check if there are any .pkl files
+                pkl_file_path = os.path.join(folder_path, pkl_files[0])  # Use the first .pkl file found
+                pkl_file_name = os.path.basename(pkl_file_path)  # Extract the filename from the full path
 
-            # Calculate the total profit for comparison
-            total_profit = profit_evaluate + profit_training + profit_validation
+                # Extract weights which are used as profit metrics
+                profit_evaluate = extract_weight_from_folder_name(folder_name)
+                profit_training, profit_validation = extract_weights_from_filename(pkl_file_name)
 
-            print(f"{pair}, {timeframe}, Training: {profit_training}, Validation: {profit_validation}, Evaluation: {profit_evaluate}, Total: {total_profit}")
+                # Calculate the total profit for comparison
+                total_profit = profit_evaluate + profit_training + profit_validation
 
-            # Check if this total profit is the highest encountered so far
-            if total_profit > max_total_profit:
-                max_total_profit = total_profit
-                best_details = {
-                    "pair": pair,
-                    "timeframe": timeframe,
-                    "pkl_file_path": pkl_file_path,
-                    "folder_path": folder_path
-                }
+                print(f"{pair}, {timeframe}, Training: {profit_training}, Validation: {profit_validation}, Evaluation: {profit_evaluate}, Total: {total_profit}")
+
+                # Check if this total profit is the highest encountered so far
+                if total_profit > max_total_profit:
+                    max_total_profit = total_profit
+                    best_details = {
+                        "pair": pair,
+                        "timeframe": timeframe,
+                        "pkl_file_path": pkl_file_path,
+                        "folder_path": folder_path
+                    }
+        else:
+            print(f"No valid folder path provided for {pair} {timeframe}")
 
     # After the loop, print details of the best result
     if best_details:
