@@ -72,6 +72,7 @@ class ForexTradingEnv(gym.Env):
         self.daily_loss_limit_reached = False
         self.trade_history = []  # History of trades made
         self.history_size = history_size
+        self.step_live_bool = False
         # Assume 7 features based on selection: Profit, Position Type, Lot Size, Price at Close, Worst Case PnL, Best Case PnL, Closed Balance
         self.history = np.zeros((self.history_size, 10))
 
@@ -154,6 +155,11 @@ class ForexTradingEnv(gym.Env):
         if action == 2:
             self.close_position_any(current_price)
 
+        if not self.step_live_bool:  # Simplified condition
+            date = self.data.index[self.current_step].strftime('%Y-%m-%d')
+        else:
+            date = self.data.index[-1].strftime('%Y-%m-%d')
+
         # If the action is 3 (hold), log the decision to hold without making a trade by appending a record to the trade history
         if action == 3:
             self.trade_history.append({
@@ -162,11 +168,13 @@ class ForexTradingEnv(gym.Env):
                 'Position': self.position,  # Record the current trading position
                 'Price': current_price,  # Record the current market price at the time of holding
                 'Balance': self.balance,  # Record the current balance of the account
-                'Date': self.data.index[self.current_step].strftime('%Y-%m-%d'),  # Format and record the current date
+                'Date': date,
                 'lot_size': 0,  # Indicate that no lot size is applicable for hold actions
                 'worst_case_pnl': self.worst_case_pnl,
                 'best_case_pnl': self.best_case_pnl
             })
+
+        self.step_live_bool = False
 
         # Check if the accumulated lot size exceeds the maximum allowed limit
         if self.accumulated_lot_size >= 100000:
@@ -281,6 +289,11 @@ class ForexTradingEnv(gym.Env):
             # Update the account balance with the profit or loss from closing the position
             self.balance += self.trade_profit
 
+            if not self.step_live_bool:  # Simplified condition
+                date = self.data.index[self.current_step].strftime('%Y-%m-%d')
+            else:
+                date = self.data.index[-1].strftime('%Y-%m-%d')
+
             # Record the closing of the position in the trade history
             self.trade_history.append({
                 'Step': self.current_step,  # Record the step at which the position was closed
@@ -289,10 +302,12 @@ class ForexTradingEnv(gym.Env):
                 'Price': current_price,  # Record the price at which the position was closed
                 'Profit': self.trade_profit,  # Record the profit or loss from the trade
                 'Balance': self.balance,  # Record the updated balance after closing the position
-                'Date': self.data.index[self.current_step].strftime('%Y-%m-%d'),  # Record the date of the position closing
+                'Date': date,  # Record the date of the position closing
                 'lot_size': self.accumulated_lot_size,  # Record the lot size of the position that was closed
                 'Closed Balance': self.balance,  # Record the balance after the position was closed
             })
+
+            self.step_live_bool = False
 
             # Reset attributes related to the position
             self.position = 'neutral'  # Reset the position status to neutral
@@ -514,6 +529,8 @@ class ForexTradingEnv(gym.Env):
         high_price = current_row['high']
         low_price = current_row['low']
         current_datetime = self.data.index[-1]
+
+        self.step_live_bool = True
 
         print(f'current price: {current_price}, high_price: {high_price},  low_price: {low_price}, current_datetime: {current_datetime}')
 
@@ -1830,11 +1847,11 @@ def calculate_time_to_next_candle(latest_time_index, timeframe):
     timeframe_mapping = {
         '1H': 1,
         '4H': 4,
-        '1D': 24
+        '1D': 24,
     }
     
     hours = timeframe_mapping.get(timeframe, 1)  # Default to 4 hours if not specified
-    hours_correct  = hours + 1
+    hours_correct  = hours + 2
     next_candle_time = latest_time_index + timedelta(hours=hours_correct, minutes=2)
     now = datetime.now() 
 
