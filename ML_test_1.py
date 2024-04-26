@@ -2034,7 +2034,7 @@ def main_menu():
         print("5 - Get Data")
         print("6 - Train Multiple Different Forex Pairs")
         print("7 - Ensemble Evaluate")
-        print("8 - Trade History")
+        print("8 - Find Best Agent")
 
         choice = input("Enter your choice (1/2/3/4/5): ")
 
