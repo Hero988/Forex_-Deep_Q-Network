@@ -84,16 +84,25 @@ class ForexTradingEnv(gym.Env):
         # Define the observation space of the environment
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_features,), dtype=np.float32)  # Observation space defined as a box with values ranging from 0 to infinity, shaped according to the window size and number of features
 
-    # Method to save the current state of the environment to a file
-    def save_state(self, filename):
-        with open(filename, 'wb') as f:  # Open the file in write-binary mode
-            pickle.dump(self.__dict__, f)  # Dump the environment's dictionary to the file
+    def save_state(self, base_filename='ForexTradingEnv_state'):
+        # Combine base filename, timestamp, and file extension
+        filename = f"{base_filename}.pkl"
+        
+        # Use the constructed filename to save the file
+        with open(filename, 'wb') as f:
+            pickle.dump(self.__dict__, f)
 
-    # Method to load the state of the environment from a file
-    def load_state(self, filename):
-        with open(filename, 'rb') as f:  # Open the file in read-binary mode
-            state_dict = pickle.load(f)  # Load the dictionary from the file
-            self.__dict__.update(state_dict)  # Update the environment's dictionary with the loaded state
+    def load_state(self, filename, new_data=None):
+        with open(filename, 'rb') as f:
+            state_dict = pickle.load(f)
+            self.__dict__.update(state_dict)
+
+        # Update the data attribute if new data is provided
+        if new_data is not None:
+            self.data = new_data
+            print("Data has been updated.")
+
+        print("State loaded from file.")
 
     def update_current_pnl(self, high_price, low_price):
         if self.position == 'long':
@@ -345,6 +354,10 @@ class ForexTradingEnv(gym.Env):
         assert observation.shape == (self.observation_space.shape[0],), f"Observation shape mismatch: {observation.shape} != {self.observation_space.shape}"
         # Return the observation to the caller, typically for starting a new episode
         return observation
+    
+    def extract_state(self):
+        observation = self._next_observation()
+        return observation
 
     def update_history_from_trade_history(self):
         # Define the action mapping
@@ -494,6 +507,55 @@ class ForexTradingEnv(gym.Env):
         # Return the next observation, the step reward, the done flag, and an empty info dict
         return next_observation, reward, done, {}
 
+    def step_live(self, action):
+        # Access the last row directly with .iloc[-1]
+        current_row = self.data.iloc[-1]
+        current_price = current_row['close']
+        high_price = current_row['high']
+        low_price = current_row['low']
+        current_datetime = self.data.index[-1]
+
+        print(f'current price: {current_price}, high_price: {high_price},  low_price: {low_price}, current_datetime: {current_datetime}')
+
+        # Reset flags and variables as needed
+        self.position_closed_recently = False
+        current_date = current_datetime.date()
+
+        # Check for a date change and update daily P&L
+        if self.last_processed_date is None or self.last_processed_date != current_date:
+            self.daily_pnl = 0 if self.last_processed_date is not None else self.daily_pnl
+
+        # Update last processed date
+        self.last_processed_date = current_date
+
+        # Update P&L based on new price data
+        self.update_current_pnl(high_price, low_price)
+        worst_balance = self.balance + self.worst_case_pnl
+        best_balance = self.balance + self.best_case_pnl
+        self.daily_pnl += self.worst_case_pnl
+
+        # Evaluate end conditions
+        done = False
+        if best_balance >= self.profit_target + self.initial_balance:
+            done = True
+            self.balance = best_balance
+            print("Profit target achieved.")
+        elif worst_balance <= self.initial_balance - self.max_loss_limit:
+            done = True
+            self.balance = worst_balance
+            print("Loss limit breached.")
+        elif self.daily_pnl < -self.max_daily_loss_limit:
+            done = True
+            print("Daily loss limit breached.")
+
+        # Execute the trade based on the action
+        self.execute_trade(action, current_price, high_price, low_price)
+
+        # Format the current date and return state information
+        current_date_str = current_datetime.strftime('%Y-%m-%d')
+
+        return self.extract_state(), done
+
     # Define a method to evaluate and summarize the trading performance
     def evaluate_performance(self):
         # Initialize peak balance, drawdown, and highest daily loss variables
@@ -591,7 +653,7 @@ class ForexTradingEnv(gym.Env):
             reward += net_loss
 
         return reward
-        
+            
 class DQN(nn.Module):
     def __init__(self, input_dim, action_dim):
         super(DQN, self).__init__()

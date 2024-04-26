@@ -84,16 +84,25 @@ class ForexTradingEnv(gym.Env):
         # Define the observation space of the environment
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_features,), dtype=np.float32)  # Observation space defined as a box with values ranging from 0 to infinity, shaped according to the window size and number of features
 
-    # Method to save the current state of the environment to a file
-    def save_state(self, filename):
-        with open(filename, 'wb') as f:  # Open the file in write-binary mode
-            pickle.dump(self.__dict__, f)  # Dump the environment's dictionary to the file
+    def save_state(self, base_filename='ForexTradingEnv_state'):
+        # Combine base filename, timestamp, and file extension
+        filename = f"{base_filename}.pkl"
+        
+        # Use the constructed filename to save the file
+        with open(filename, 'wb') as f:
+            pickle.dump(self.__dict__, f)
 
-    # Method to load the state of the environment from a file
-    def load_state(self, filename):
-        with open(filename, 'rb') as f:  # Open the file in read-binary mode
-            state_dict = pickle.load(f)  # Load the dictionary from the file
-            self.__dict__.update(state_dict)  # Update the environment's dictionary with the loaded state
+    def load_state(self, filename, new_data=None):
+        with open(filename, 'rb') as f:
+            state_dict = pickle.load(f)
+            self.__dict__.update(state_dict)
+
+        # Update the data attribute if new data is provided
+        if new_data is not None:
+            self.data = new_data
+            print("Data has been updated.")
+
+        print("State loaded from file.")
 
     def update_current_pnl(self, high_price, low_price):
         if self.position == 'long':
@@ -345,6 +354,10 @@ class ForexTradingEnv(gym.Env):
         assert observation.shape == (self.observation_space.shape[0],), f"Observation shape mismatch: {observation.shape} != {self.observation_space.shape}"
         # Return the observation to the caller, typically for starting a new episode
         return observation
+    
+    def extract_state(self):
+        observation = self._next_observation()
+        return observation
 
     def update_history_from_trade_history(self):
         # Define the action mapping
@@ -493,6 +506,55 @@ class ForexTradingEnv(gym.Env):
         assert next_observation.shape == (self.observation_space.shape[0],), f"Next observation shape mismatch: {next_observation.shape} != {self.observation_space.shape}"
         # Return the next observation, the step reward, the done flag, and an empty info dict
         return next_observation, reward, done, {}
+
+    def step_live(self, action):
+        # Access the last row directly with .iloc[-1]
+        current_row = self.data.iloc[-1]
+        current_price = current_row['close']
+        high_price = current_row['high']
+        low_price = current_row['low']
+        current_datetime = self.data.index[-1]
+
+        print(f'current price: {current_price}, high_price: {high_price},  low_price: {low_price}, current_datetime: {current_datetime}')
+
+        # Reset flags and variables as needed
+        self.position_closed_recently = False
+        current_date = current_datetime.date()
+
+        # Check for a date change and update daily P&L
+        if self.last_processed_date is None or self.last_processed_date != current_date:
+            self.daily_pnl = 0 if self.last_processed_date is not None else self.daily_pnl
+
+        # Update last processed date
+        self.last_processed_date = current_date
+
+        # Update P&L based on new price data
+        self.update_current_pnl(high_price, low_price)
+        worst_balance = self.balance + self.worst_case_pnl
+        best_balance = self.balance + self.best_case_pnl
+        self.daily_pnl += self.worst_case_pnl
+
+        # Evaluate end conditions
+        done = False
+        if best_balance >= self.profit_target + self.initial_balance:
+            done = True
+            self.balance = best_balance
+            print("Profit target achieved.")
+        elif worst_balance <= self.initial_balance - self.max_loss_limit:
+            done = True
+            self.balance = worst_balance
+            print("Loss limit breached.")
+        elif self.daily_pnl < -self.max_daily_loss_limit:
+            done = True
+            print("Daily loss limit breached.")
+
+        # Execute the trade based on the action
+        self.execute_trade(action, current_price, high_price, low_price)
+
+        # Format the current date and return state information
+        current_date_str = current_datetime.strftime('%Y-%m-%d')
+
+        return self.extract_state(), done
 
     # Define a method to evaluate and summarize the trading performance
     def evaluate_performance(self):
@@ -1585,83 +1647,6 @@ def evaluate_DQN_model(choice):
 
         return target_directory
 
-def get_data():
-    # Retrieve and store the current date
-    current_date = str(datetime.now().date())
-    current_date_datetime = datetime.now().date()
-
-    # Calculate the date for one month before the current date
-    one_month_before = current_date_datetime - relativedelta(months=1)
-    # Convert to string if needed
-    one_month_before_str = str(one_month_before)
-
-    # Hardcoded start date for strategy evaluation
-    strategy_start_date_all = "1971-01-04"
-    # Use the current date as the end date for strategy evaluation
-    strategy_end_date_all = current_date
-
-    # Convert string representation of dates to datetime objects for further processing
-    start_date_all = datetime.strptime(strategy_start_date_all, "%Y-%m-%d")
-    end_date_all = datetime.strptime(strategy_end_date_all, "%Y-%m-%d")
-
-    # Prompt the user for the desired timeframe for analysis and standardize the input
-    timeframe_str = input("Enter the currency pair (e.g., Daily, 1H): ").strip().upper()
-    # Prompt the user for the currency pair they're interested in and standardize the input
-    Pair = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
-
-    training_start_date = "2023-01-01"
-    training_end_date = current_date
-
-    # Fetch and prepare the FX data for the specified currency pair and timeframe
-    eur_usd_data = fetch_fx_data_mt5(Pair, timeframe_str, start_date_all, end_date_all)
-
-    eur_usd_data = calculate_indicators(eur_usd_data) 
-
-    # Filter the EUR/USD data for the in-sample training period
-    dataset = eur_usd_data[(eur_usd_data.index >= training_start_date) & (eur_usd_data.index <= training_end_date)]
-
-    dataset = dataset.fillna(0)
-
-    training_set, testing_set = split_and_save_dataset(dataset, timeframe_str, Pair)
-
-    return training_set, testing_set, Pair, timeframe_str
-
-def get_data_multiple(Pair, timeframe_str):
-    # Retrieve and store the current date
-    current_date = str(datetime.now().date())
-    current_date_datetime = datetime.now().date()
-
-    # Calculate the date for one month before the current date
-    one_month_before = current_date_datetime - relativedelta(months=1)
-    # Convert to string if needed
-    one_month_before_str = str(one_month_before)
-
-    # Hardcoded start date for strategy evaluation
-    strategy_start_date_all = "1971-01-04"
-    # Use the current date as the end date for strategy evaluation
-    strategy_end_date_all = current_date
-
-    # Convert string representation of dates to datetime objects for further processing
-    start_date_all = datetime.strptime(strategy_start_date_all, "%Y-%m-%d")
-    end_date_all = datetime.strptime(strategy_end_date_all, "%Y-%m-%d")
-
-    training_start_date = "2023-01-01"
-    training_end_date = current_date
-
-    # Fetch and prepare the FX data for the specified currency pair and timeframe
-    eur_usd_data = fetch_fx_data_mt5(Pair, timeframe_str, start_date_all, end_date_all)
-
-    eur_usd_data = calculate_indicators(eur_usd_data) 
-
-    # Filter the EUR/USD data for the in-sample training period
-    dataset = eur_usd_data[(eur_usd_data.index >= training_start_date) & (eur_usd_data.index <= training_end_date)]
-
-    dataset = dataset.fillna(0)
-
-    training_set, testing_set = split_and_save_dataset(dataset, timeframe_str, Pair)
-
-    return training_set, testing_set
-
 def extract_weights_from_filename(filename):
     # Enhanced regex pattern to extract numbers (weights) from the filename
     # This pattern also handles spaces and assumes weights may be surrounded by varied characters
@@ -1813,7 +1798,7 @@ def fetch_live_data(symbol, timeframe_str):
         return None
 
     # Get the last 10 bars of the given symbol and timeframe
-    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 2)
     if rates is None:
         print("No rates retrieved, error code =", mt5.last_error())
         return None
@@ -1825,9 +1810,7 @@ def fetch_live_data(symbol, timeframe_str):
 
     return rates_frame
 
-def load_agent(filename):
-
-    input_dim = 288 * 25  # Example: 1440
+def load_agent(filename, input_dim):
 
     action_dim = 4  # One for each action type
 
@@ -1851,7 +1834,7 @@ def calculate_time_to_next_candle(latest_time_index, timeframe):
     }
     
     hours = timeframe_mapping.get(timeframe, 4)  # Default to 4 hours if not specified
-    next_candle_time = latest_time_index + timedelta(hours=hours, minutes=10)
+    next_candle_time = latest_time_index + timedelta(hours=hours, minutes=3)
     now = datetime.now() 
 
     # Format to just include the hour and minute
@@ -1877,61 +1860,7 @@ def countdown(t):
         t -= 1
     print("Next candle is now live!           ")
 
-def live_data_loop(symbol, timeframe, dataset):
-    action_mappings = {
-        0: "Buy",
-        1: "Sell",
-        2: "Close",
-        3: "Hold"
-    }
-
-    # CSV file path
-    csv_file_path = 'actions_log.csv'
-
-    # Check if the file exists and create it with headers if it does not
-    if not os.path.exists(csv_file_path):
-        with open(csv_file_path, 'w') as file:
-            file.write("Time,Action\n")  # Assuming you want to log the time and the corresponding action
-
-    agent = load_agent('agent_state_EURUSD_4H.pkl')
-    initialize_mt5()
-    env = ForexTradingEnv(dataset)  # Initialize your environment here
-
-    while True:
-        data = fetch_live_data(symbol, timeframe)
-        if data is not None:
-            data = data[:-1]  # Slices off the last row
-            data.index = data.index - pd.Timedelta(hours=2)  # Adjust the time by subtracting 2 hours
-            data.index = data.index.tz_localize(None)  # Remove the timezone information
-            
-            # Concatenate new data
-            dataset = pd.concat([dataset, data]).drop_duplicates()
-            dataset = calculate_indicators(dataset)
-            dataset.to_csv(f'Full_data.csv', index=True)
-
-            latest_state = env.get_latest_state(dataset)  # Ensure this method is correctly defined in your environment class
-            next_action_code = agent.get_next_action(latest_state)
-            next_action = action_mappings[next_action_code]  # Map the action code to a trading action
-
-            # Get the latest time index
-            latest_time_index = dataset.index[-1].strftime('%Y-%m-%d %H:%M:%S')
-
-            # Write the latest time index and action to the CSV file
-            with open(csv_file_path, 'a') as file:
-                file.write(f"{latest_time_index},{next_action}\n")
-
-            print(f"Next action to perform: {next_action} at {latest_time_index}")
-
-            next_state, reward, done, _ = env.step(next_action, env.trade_history)
-
-            print(env.is_open_position)
-
-            # Calculate time to sleep until the next candle plus 5 minutes
-            sleep_time, next_candle_time_str, time_string = calculate_time_to_next_candle(latest_time_index, timeframe)  # Adjust '4H' as necessary
-            print(f"Next candle will form at: {next_candle_time_str} and the current time is {time_string}")
-            countdown(sleep_time)  # Display countdown
-
-def live_data_loop(symbol, timeframe, dataset):
+def live_data_loop(symbol, timeframe, dataset, pkl_file_name):
     action_mappings = {
         0: "Buy",
         1: "Sell",
@@ -1947,32 +1876,60 @@ def live_data_loop(symbol, timeframe, dataset):
         with open(csv_file_path, 'w') as file:
             file.write("Time,Action\n")  # Log the time and the corresponding action
 
-    agent = load_agent('agent_state_EURUSD_4H.pkl')
+    num_columns = len(dataset.columns)
+
+    # Retrieve the latest row
+    latest_row = dataset.tail(1)
+
     initialize_mt5()
-    env = ForexTradingEnv(dataset)  # Initialize your environment here
+
+    env = ForexTradingEnv(latest_row, num_columns)  # Initialize your environment here
+
+    input_dim = env.observation_space.shape[0]  # Or any other method to find the total features per timestep.
+
+    agent = load_agent(f'{pkl_file_name}', input_dim)
+
+    env.save_state(f'{symbol}_{timeframe}_enviroment')
+
+    state = env.extract_state()
+
+    print(env.current_balance)
 
     while True:
         data = fetch_live_data(symbol, timeframe)
         if data is not None:
-            data = data[:-1]  # Slices off the last row
+
+            data = data[:-1]
+            
             data.index = data.index - pd.Timedelta(hours=2)  # Adjust the time by subtracting 2 hours
             data.index = data.index.tz_localize(None)  # Remove the timezone information
+
+            df = pd.DataFrame(data)
+
+            # Append the new row to the existing DataFrame
+            dataset = pd.concat([dataset, df])
             
-            # Calculate indicators for the updated dataset
-            # Concatenate new data
-            updated_dataset = pd.concat([dataset, data]).drop_duplicates()
-            updated_dataset = calculate_indicators(env.data)
-            updated_dataset.to_csv(f'Full_data.csv', index=True)
+            calculate_indicators(dataset)
 
-            # Update the environment with the new data
-            env.update_data(updated_dataset)
+            latest_updated_row = dataset.tail(1)
 
-            latest_state = env.get_latest_state()  # Ensure this method is correctly defined in your environment class
-            next_action_code = agent.get_next_action(latest_state)
-            next_action = action_mappings[next_action_code]  # Map the action code to a trading action
+            if os.path.exists('Latest_Rows.csv'):
+                latest_updated_row.to_csv('Latest_Rows.csv', mode='a', header=False, index=True)
+            else:
+                latest_updated_row.to_csv('Latest_Rows.csv', mode='w', header=True, index=True)
+
+            env.load_state(f'{symbol}_{timeframe}_enviroment.pkl', new_data=latest_updated_row)
+
+            state = env.extract_state()
+
+            action, q_values = agent.act(state)
+
+            print(f'Current q_values: {q_values}')
+
+            next_action = action_mappings[action]  # Map the action code to a trading action
 
             # Get the latest time index
-            latest_time_index = updated_dataset.index[-1].strftime('%Y-%m-%d %H:%M:%S')
+            latest_time_index = latest_updated_row.index[-1].strftime('%Y-%m-%d %H:%M:%S')
 
             # Write the latest time index and action to the CSV file
             with open(csv_file_path, 'a') as file:
@@ -1980,9 +1937,11 @@ def live_data_loop(symbol, timeframe, dataset):
 
             print(f"Next action to perform: {next_action} at {latest_time_index}")
 
-            next_state, reward, done, info = env.step(next_action_code, env.trade_history)  # Step using the action code
+            state_current, done, = env.step_live(action)
 
             print(f"Trade executed: {next_action}, Open Position: {env.is_open_position}, Current Balance: {env.current_balance}")
+
+            env.save_state(f'{symbol}_{timeframe}_enviroment')
 
             # Calculate time to sleep until the next candle plus 5 minutes
             sleep_time, next_candle_time_str, time_string = calculate_time_to_next_candle(latest_time_index, timeframe)
@@ -2047,20 +2006,24 @@ def get_data(choice, symbol, timeframe):
         # Convert string representation of dates to datetime objects for further processing
         start_date_all = datetime.strptime(strategy_start_date_all, "%Y-%m-%d")
         end_date_all = datetime.strptime(strategy_end_date_all, "%Y-%m-%d")
-        
-        training_start_date = "2023-01-01"
-        training_end_date = current_date
 
         # Fetch and prepare the FX data for the specified currency pair and timeframe
         eur_usd_data = fetch_fx_data_mt5(symbol, timeframe, start_date_all, end_date_all)
 
-        # Apply technical indicators to the data using the 'calculate_indicators' function
         eur_usd_data = calculate_indicators(eur_usd_data) 
 
-        # Filter the EUR/USD data for the in-sample training period
-        dataset = eur_usd_data[(eur_usd_data.index >= training_start_date) & (eur_usd_data.index <= training_end_date)]
+        eur_usd_data = eur_usd_data.fillna(0)
 
-        return dataset
+        eur_usd_data = eur_usd_data[:-2]
+
+        return eur_usd_data
+
+def extract_info_from_file_name(file_name):
+    # Extracts information assuming folder name format "evaluate_{Pair}_{timeframe}_otherinfo"
+    parts = file_name.split('_')
+    pair = parts[3]
+    timeframe = parts[4]
+    return pair, timeframe
 
 def main_menu():
     while True:
@@ -2082,10 +2045,17 @@ def main_menu():
             get_data(choice)
             break
         elif choice == '4':
-            timeframe = input("Enter the currency pair (e.g., Daily, 1H): ").strip().upper()
-            symbol = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
+            folder_path = os.getcwd()
+            pkl_files = [f for f in os.listdir(folder_path) if f.endswith('.pkl')]
+            if pkl_files:  # Check if there are any .pkl files
+                pkl_file_path = os.path.join(folder_path, pkl_files[0])  # Use the first .pkl file found
+                pkl_file_name = os.path.basename(pkl_file_path)  # Extract the filename from the full path
+            else:
+                print('No Agent File Fould')
+                return
+            symbol, timeframe = extract_info_from_file_name(f'{pkl_file_name}')
             dataset = get_data(choice, symbol, timeframe)
-            live_data_loop(symbol, timeframe, dataset)
+            live_data_loop(symbol, timeframe, dataset, pkl_file_name)
             break
         else:
             print("Invalid choice. Please enter 1, 2 or 3 .")
