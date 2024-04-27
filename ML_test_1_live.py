@@ -23,6 +23,8 @@ import MetaTrader5 as mt5
 import shutil
 import time as t_time
 import re
+from dotenv import load_dotenv
+load_dotenv()  # This line should be at the top of your script
 
 # Define the ForexTradingEnv class, inheriting from gym.Env to create a custom trading environment
 class ForexTradingEnv(gym.Env):
@@ -956,27 +958,12 @@ def evaluate_model(agent_save_filename, testing_set):
         })
         print(decision_data)
 
-def initialize_mt5():
-    if not mt5.initialize():
-        print("initialize() failed, error code =", mt5.last_error())
-        quit()
-
-    account_number = 530062481
-    password = 'N?G9rPt@'
-    server_name ='FTMO-Server3'
-
-    if not mt5.login(account_number, password=password, server=server_name):
-        print("login failed, error code =", mt5.last_error())
-        mt5.shutdown()
-        quit()
-    print("Connected to MetaTrader 5")
-
 def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
 
     # Define your MetaTrader 5 account number
-    account_number = 530062481
+    account_number = os.getenv('account_number')
     # Define your MetaTrader 5 password
-    password = 'N?G9rPt@'
+    password = f'{os.getenv('password')}'
     # Define the server name associated with your MT5 account
     server_name ='FTMO-Server3'
 
@@ -1958,9 +1945,9 @@ def execute_trade(symbol, trade_type, stop_loss_percent, take_profit_percent):
 
 def initialize_mt5():
     # Define your MetaTrader 5 account number
-    account_number = 530064788
+    account_number = os.getenv('account_number')
     # Define your MetaTrader 5 password
-    password = 'fe5@6YV*'
+    password = f'{os.getenv('password')}'
     # Define the server name associated with your MT5 account
     server_name ='FTMO-Server3'
 

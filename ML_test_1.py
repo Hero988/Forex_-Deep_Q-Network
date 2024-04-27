@@ -23,6 +23,8 @@ from torch.utils.tensorboard import SummaryWriter
 import time
 import shutil
 import re
+from dotenv import load_dotenv
+load_dotenv()  # This line should be at the top of your script
 
 # Define the ForexTradingEnv class, inheriting from gym.Env to create a custom trading environment
 class ForexTradingEnv(gym.Env):
@@ -1124,9 +1126,9 @@ def evaluate_model(agent_save_filename, testing_set):
 def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
 
     # Define your MetaTrader 5 account number
-    account_number = 530062481
+    account_number = os.getenv('account_number')
     # Define your MetaTrader 5 password
-    password = 'N?G9rPt@'
+    password = f'{os.getenv('password')}'
     # Define the server name associated with your MT5 account
     server_name ='FTMO-Server3'
 
