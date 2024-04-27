@@ -1,7 +1,7 @@
 import pandas as pd
 import datetime
 import MetaTrader5 as mt5
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import gymnasium as gym
 import pytz
 import numpy as np
@@ -18,10 +18,10 @@ import glob
 import matplotlib.dates as mdates
 import random
 from collections import deque
-import time
 from dateutil.parser import parse
 import MetaTrader5 as mt5
 import shutil
+import time as t_time
 import re
 
 # Define the ForexTradingEnv class, inheriting from gym.Env to create a custom trading environment
@@ -1843,7 +1843,7 @@ def calculate_time_to_next_candle(latest_time_index, timeframe):
     # Convert latest_time_index to datetime if it's a string
     if isinstance(latest_time_index, str):
         latest_time_index = parse(latest_time_index)
-
+    
     timeframe_mapping = {
         '1H': 1,
         '4H': 4,
@@ -1853,20 +1853,31 @@ def calculate_time_to_next_candle(latest_time_index, timeframe):
     hours = timeframe_mapping.get(timeframe, 1)  # Default to 4 hours if not specified
     hours_correct  = hours + 2
     next_candle_time = latest_time_index + timedelta(hours=hours_correct, minutes=2)
+
+    # Adjust for weekends if the next candle time falls on Saturday or Sunday
+    if next_candle_time.weekday() == 5:  # Saturday
+        next_candle_time += timedelta(days=2)  # Move to Monday
+    elif next_candle_time.weekday() == 6:  # Sunday
+        next_candle_time += timedelta(days=1)  # Move to Monday
+
+    if latest_time_index.weekday() == 4 and latest_time_index.time() == time(16, 0): # Friday at 4pm
+        next_candle_time += timedelta(days=2)
+         
+
+
     now = datetime.now() 
 
-    # Format to just include the hour and minute
-    next_candle_time_str = next_candle_time.strftime("%H:%M")
+    # Format to include the date, hour, and minute
+    next_candle_time_str = next_candle_time.strftime("%Y-%m-%d %H:%M")
 
-    # Access the hour and minute
+    # Access the current hour, minute, and format current time string
     current_hour = now.hour
     current_minute = now.minute
-
-    time_string = f"{current_hour:02d}:{current_minute:02d}"
+    current_time_str = now.strftime("%Y-%m-%d %H:%M")
     
     # Calculate difference in seconds
     delta_seconds = (next_candle_time - now).total_seconds()
-    return max(0, int(delta_seconds)), next_candle_time_str, time_string  # Ensure non-negative
+    return max(0, int(delta_seconds)), next_candle_time_str, current_time_str  # Ensure non-negative
 
 def countdown(t):
     print("\n")  # Ensure the countdown starts on a new line
@@ -1874,7 +1885,7 @@ def countdown(t):
         mins, secs = divmod(t, 60)
         time_format = '{:02d}:{:02d}'.format(mins, secs)
         print(f"The next candle will form in: {time_format}", end='\r')
-        time.sleep(1)
+        t_time.sleep(1)
         t -= 1
     print("Next candle is now live!           ")
 
