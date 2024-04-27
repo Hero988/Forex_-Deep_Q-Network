@@ -2016,7 +2016,7 @@ def live_data_loop(symbol, timeframe, dataset, pkl_file_name):
         data = fetch_live_data(symbol, timeframe)
         if data is not None:
 
-            enable_live_trading = False
+            enable_live_trading = True
 
             data = data[:-1]
             
