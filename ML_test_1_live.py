@@ -1071,6 +1071,12 @@ def get_user_date_input(prompt):
             date_str = input(prompt)
 
 def calculate_indicators(data, bollinger_length=12, bollinger_std_dev=1.5, sma_trend_length=50, window=9):
+    # Check for duplicates
+    if data.index.duplicated().any():
+        print("Duplicate indices found! Handling them now...")
+        # Resolve duplicates - you might want to tailor this approach based on your needs
+        data = data[~data.index.duplicated(keep='first')]
+        
     # Calculate the 50-period simple moving average of the 'close' price
     data['SMA_50'] = ta.sma(data['close'], length=50)
     # Calculate the 200-period simple moving average of the 'close' price
